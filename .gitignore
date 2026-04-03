@@ -1,0 +1,45 @@
+# Build output
+build/
+frontend/dist/
+frontend/node_modules/
+node_modules/
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+*.prof
+cover.html
+coverage.txt
+
+# Database & secrets
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.p12
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Scratchpad
+scratchpad/
