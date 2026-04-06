@@ -2,13 +2,13 @@
 
 A desktop app that makes your local files searchable by meaning, not just keywords. Point it at your folders, and it indexes everything — documents, code, notes, spreadsheets — into a local SQLite vector database. Then ask questions in natural language and get relevant results ranked by semantic similarity.
 
-Works standalone via the GUI, or as an MCP server that gives Claude Desktop (or any MCP client) direct access to search your files.
+Works as a standalone file tracker/indexer and as an MCP server that gives Claude Desktop (or any MCP client) direct access to semantic search across your files.
 
 ## How It Works
 
 1. **Launch the app** and enter your OpenAI API key in the onboarding screen (used for generating embeddings — your files never leave your machine except as embedding API calls).
 2. **Add directories** you want indexed. The app watches them in real time — new files, edits, and deletions are picked up automatically.
-3. **Search from the GUI**, or connect Claude Desktop so it can search your files during conversations.
+3. **Search your files**, connect Claude Desktop so it can search your files during conversations.
 
 ### Connecting to Claude Desktop
 
@@ -23,7 +23,7 @@ Under the hood, Claude Desktop launches the app as a subprocess (`--mcp` flag) t
 - **PDFs** — text content extraction
 - **Media & archives** — metadata only (file name, size, dimensions, contents list)
 
-Files are chunked into ~512-token segments, embedded via OpenAI, and stored as vectors. Unchanged files (matched by SHA-256 hash) are skipped on re-scan.
+Files are chunked into ~512-token segments (configurable), embedded via OpenAI, and stored as vectors. Unchanged files (matched by SHA-256 hash) are skipped on re-scan.
 
 ### Supported Embedding Models
 
