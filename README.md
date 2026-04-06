@@ -111,6 +111,16 @@ go test -cover ./...                # with coverage
 go test -v ./internal/engine/       # verbose, specific package
 ```
 
+## Contributing
+
+Contributions are welcome! By submitting a pull request or otherwise contributing code to this project, you agree that your contributions become the intellectual property of United Effects Ventures, LLC, licensed under the same terms as the rest of the project (see [LICENSE](LICENSE)). You represent that you have the right to make such contributions and that no other party has claims to the contributed work.
+
+## License
+
+This project is licensed under the [Business Source License 1.1](LICENSE). You may use it for personal, non-commercial purposes. Commercial use requires a separate license from United Effects Ventures, LLC. On April 6, 2031, the license converts to Apache 2.0.
+
+See [TRADEMARK.md](TRADEMARK.md) for copyright and trademark details.
+
 ## Documentation
 
 See `Documentation/` for detailed technical docs:
