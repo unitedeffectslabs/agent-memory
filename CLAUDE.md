@@ -11,6 +11,10 @@ make test           # go test ./...
 make clean          # rm -rf build/bin
 ```
 
+> **macOS 26+ gotcha:** Go ≤ 1.24 produces CGo binaries the kernel kills instantly on launch
+> (exit 137, `dyld: missing LC_UUID`) — this breaks `make build`, the `wails` CLI, and the built
+> app. Fix: `go env -w GOTOOLCHAIN=go1.26.4`, then `go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0`.
+
 Run modes:
 - `./agent-memory` — GUI mode (default)
 - `./agent-memory --mcp` — MCP stdio mode (for Claude Desktop)
@@ -55,6 +59,14 @@ go test ./...                      # all tests
 go test -v ./internal/engine/      # verbose, specific package
 go test -cover ./...               # with coverage
 ```
+
+## Active Work
+
+Planned/in-progress work is defined in epics under `Documentation/Epics/` — each has a `Status:`
+field and, if executable, an "Execution Notes" section addressed to the implementing session.
+Read the epic's Execution Notes before starting; its stated user constraints are binding.
+Current: [local-embeddings](Documentation/Epics/local-embeddings.md) (local model replaces
+OpenAI as the default embedding provider).
 
 ## Constraints
 
