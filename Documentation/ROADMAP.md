@@ -1,5 +1,11 @@
 # Roadmap
 
+## Local Embeddings (Epic)
+
+Replace OpenAI as the default embedding provider with a bundled in-process local model
+(ONNX Runtime + multilingual-e5-small); OpenAI becomes an explicit opt-in backup. Full design
+and implementation plan: [Epics/local-embeddings.md](Epics/local-embeddings.md).
+
 ## Search Configuration UI
 
 Currently, search parameters (limit, offset, threshold) are controlled per-query by the LLM via MCP tool arguments. Defaults are applied in `engine.go`:
@@ -29,3 +35,7 @@ All six file operations (create, update, delete, rename, move, new directory) we
 ## MCP Transport Verification
 
 HTTP/SSE transport verified via curl. Stdio transport implemented and tested — Claude Desktop connects via `--mcp` flag (subprocess, stdin/stdout). One-click install button added to Settings. Custom Connector UI (HTTPS) was explored but rejected due to self-signed cert restrictions; stdio transport is the production solution.
+
+## Window Controls (GUI Polish)
+
+The main window is missing the standard OS window controls (minimize / maximize / close — the "traffic light" buttons on macOS). Likely a Wails frameless/titlebar option is set (or defaulting) such that the native title bar is suppressed. Restore standard window chrome, or add custom controls, so the window behaves like any other OS window. Minor.
