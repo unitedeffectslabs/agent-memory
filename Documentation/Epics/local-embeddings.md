@@ -1,7 +1,7 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** Proposed
+**Status:** In Progress — Phase 0 complete (mE5-small chosen); entering Phase 1
 **Owner:** Bo Motlagh
 
 ## Goal
@@ -121,6 +121,49 @@ perfectly (strictly safer than pinning the old 1.23 official binary, which would
 newer-headers/older-runtime mismatch). The artifact is hosted in this repo's GitHub releases and
 pinned by SHA-256 in `assets/manifest.json` like every other artifact — `make assets` treats it
 identically to officially-published binaries.
+
+## Phase 0 Results
+
+**Date:** 2026-07-06 · **Outcome: GATE PASSED** — local embedding stack proven end-to-end on
+macOS arm64 (throwaway spike, scratchpad only; no repo code touched).
+
+**Verified stack (all pinned versions worked):** ONNX Runtime 1.26.0 CPU via `onnxruntime_go`
+v1.31.0; tokenizer via `daulet/tokenizers` v1.27.0 (prebuilt `libtokenizers.darwin-arm64`);
+models `Xenova/multilingual-e5-small` int8 (118 MB) and
+`ibm-granite/granite-embedding-97m-multilingual-r2` int8 (98 MB). Pipeline
+tokenizer → ORT → mean-pool → L2-normalize produced a valid **384-dim, L2-norm = 1.0** vector;
+multilingual tokenization (EN/ES/ZH/AR) sane.
+
+| Metric | mE5-small | Granite-97m |
+|---|---|---|
+| Cold load | 129 ms | 145 ms |
+| Per-chunk @ batch 16 (~300 tok) | ~34 ms (~30/s) | ~32 ms |
+| Peak RSS (upper bound) | ~1.3 GB | ~1.5 GB |
+| Disk | 118 MB | 98 MB |
+
+**Quality (cosine; distance = 1 − cos):** ordering correct — related 0.13–0.18 <
+cross-lingual 0.17–0.22 < unrelated ~0.29 (mE5). Cross-lingual (EN↔ES) retrieval works well.
+
+**Model decision:** **`multilingual-e5-small` is the committed default.** **Granite-97m logged as
+a future upgrade candidate** — it loaded and ran at full speed on arm64 (the AVX2-int8 concern did
+not materialize), smaller file, crisper related/unrelated separation, but marginally weaker
+cross-lingual; needs a broader recall eval + prefix-convention decision before promotion. Upside,
+not a dependency (model = data file).
+
+**Findings that adjust the plan:**
+
+1. **mE5 requires `token_type_ids`.** The Xenova export takes **three** INT64 inputs
+   (`input_ids`, `attention_mask`, `token_type_ids`), not two — pass a zero tensor for
+   `token_type_ids` or ORT errors. Affects the Phase 2 `LocalEmbedder` inference code. (Granite
+   takes the two-input form.)
+2. **Default search threshold `1.5` is miscalibrated for local vectors** (real related-vs-unrelated
+   separation is ~0.25 cosine distance; 1.5 admits nearly everything). Make the default
+   **provider-aware**, and confirm which distance metric sqlite-vec's `vec0` table is configured for
+   before tuning.
+3. **Peak RSS ~1 GB** (ORT memory arena + batch activations) — constrain ORT arena / batch size in
+   `LocalEmbedder` for the desktop memory budget.
+4. **Build flags:** minimal `CGO_LDFLAGS="-L<dir> -ltokenizers"` suffices on darwin arm64; no
+   `-framework` flags needed (the lib embeds `-ldl -lm`).
 
 ## Architecture
 
