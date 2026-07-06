@@ -442,6 +442,23 @@ and the indexing-progress UX all already exist and are the extension points.
 | Binary size ~180 MB | Accepted | Decision made 2026-07-02; the trade for zero API cost |
 | int8 quantization quality drop vs fp32 | Low | Phase 0 sanity comparison; fp32 fallback possible at 449 MB if unacceptable |
 
+## Open Concerns & Plan Adjustments (from review + Phase 0)
+
+Captured 2026-07-06 during pre-implementation review and the Phase 0 spike. Each item is tagged to
+the phase that must address it, so nothing is lost mid-epic.
+
+| # | Concern | Fix in | Note |
+|---|---|---|---|
+| 1 | **Chunker not swapped on runtime provider switch.** `engine` has `SetEmbedder` but no `SetChunker`; `app.SetConfig` swaps only the embedder — switching OpenAI↔local at runtime would leave the wrong tokenizer/clamp. | **Phase 3** | Add `engine.SetChunker` (or a combined provider swap); `SetConfig` provider case swaps embedder + chunker atomically. |
+| 2 | **Read-only stdio dimension mismatch unhandled.** `readonly.Search` embeds the query with a config-derived embedder; if its dim disagrees with the stored vectors, sqlite-vec errors and the read-only process cannot re-index. | **Phase 3** | stdio compares embedder `Dimensions()`/fingerprint to the stored table; return an actionable error ("rebuild in the GUI"), not a raw failure. |
+| 3 | **Existing-user onboarding regression.** Switching the gate to `onboarding_complete` re-onboards current users and defaults them to local, mismatching their OpenAI vectors. | **Phase 4** | Migration: if the DB has watched dirs or a saved key, back-fill `onboarding_complete=true` and preserve `provider=openai` for existing OpenAI DBs. |
+| 4 | **Scattered default-model/dimension hardcodes** (`"text-embedding-3-small"` ×5, `1536` ×2). | **Phase 3** (seed in Phase 1) | Centralize `defaultModel(provider)` / `defaultDimension(provider,model)`; stop trading a `1536`→`384` hardcode. |
+| 5 | **Threshold `1.5` duplicated (~4 sites) and miscalibrated** for local (Phase 0: real separation ~0.25 cosine distance). | **Phase 3** | Centralize the default; make it provider-aware; confirm sqlite-vec's configured distance metric. |
+| 6 | **mE5 needs `token_type_ids`** (3 INT64 inputs, not 2). | **Phase 2** | Pass a zero tensor in `LocalEmbedder`. |
+| 7 | **Peak RSS ~1 GB** (ORT arena + batch activations). | **Phase 2** | Constrain ORT arena / batch size. |
+| 8 | **`go:embed` must be build-tagged per platform** (one binary can embed only one platform's ORT lib). | **Phase 5** | Build constraints on the embed directives. |
+| 9 | **`OpenAIEmbedder.MaxInputTokens()==0` ("no limit")** — footgun if `chunk_size` ever exceeds OpenAI's 8191. | Low priority | Documented trade-off; add a comment. |
+
 ## Out of Scope (this epic)
 
 - Ollama / external-runtime provider option
