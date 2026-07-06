@@ -301,7 +301,9 @@ func (eng *Engine) IndexFile(path string) error {
 	return nil
 }
 
-// maxTokensPerBatch is the max tokens per OpenAI embedding API call.
+// maxTokensPerBatch is the max tokens per OpenAI embedding API call. This is
+// OpenAI-API-specific and harmless for a local embedder (which sub-batches
+// internally), since it only bounds how many chunks are sent per call.
 const maxTokensPerBatch = 250000 // conservative, API limit is 300K
 
 // embedBatched sends chunks to the embedder in batches that fit within the API
@@ -342,7 +344,7 @@ func (eng *Engine) embedSlice(chunks []chunker.ChunkResult) ([][]float32, error)
 	for i, c := range chunks {
 		texts[i] = c.Content
 	}
-	return eng.embedder.Embed(texts)
+	return eng.embedder.EmbedDocuments(texts)
 }
 
 // findDirectoryID returns the directory ID for the watched directory that
@@ -387,14 +389,14 @@ func (eng *Engine) Search(params domain.SearchParams) ([]domain.SearchResult, er
 		params.Threshold = 1.5
 	}
 
-	vectors, err := eng.embedder.Embed([]string{params.Query})
+	vector, err := eng.embedder.EmbedQuery(params.Query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	if len(vectors) == 0 {
+	if len(vector) == 0 {
 		return nil, fmt.Errorf("embedder returned no vectors")
 	}
-	return eng.store.Search(vectors[0], params.Limit, params.Offset, params.Threshold)
+	return eng.store.Search(vector, params.Limit, params.Offset, params.Threshold)
 }
 
 // AddDirectory adds a directory to the store and watcher, then walks and

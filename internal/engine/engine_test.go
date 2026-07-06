@@ -97,7 +97,7 @@ func TestIndexFile(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			vecs := make([][]float32, len(texts))
 			for i := range texts {
 				vecs[i] = []float32{float32(i), 0.5}
@@ -188,7 +188,7 @@ func TestSearch(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			if len(texts) != 1 || texts[0] != "test query" {
 				t.Errorf("unexpected texts: %v", texts)
 			}
@@ -492,7 +492,7 @@ func TestAddDirectorySkipsIgnoredFiles(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			vecs := make([][]float32, len(texts))
 			for i := range texts {
 				vecs[i] = []float32{0.1}

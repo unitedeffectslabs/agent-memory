@@ -48,7 +48,7 @@ func TestEmbed_Success(t *testing.T) {
 	})
 	defer srv.Close()
 
-	results, err := embedder.Embed([]string{"hello", "world"})
+	results, err := embedder.EmbedDocuments([]string{"hello", "world"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestEmbed_Batching(t *testing.T) {
 		texts[i] = "text"
 	}
 
-	results, err := embedder.Embed(texts)
+	results, err := embedder.EmbedDocuments(texts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestEmbed_APIError(t *testing.T) {
 	})
 	defer srv.Close()
 
-	_, err := embedder.Embed([]string{"hello"})
+	_, err := embedder.EmbedDocuments([]string{"hello"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -150,7 +150,7 @@ func TestEmbed_RetryOn429(t *testing.T) {
 	})
 	defer srv.Close()
 
-	results, err := embedder.Embed([]string{"hello"})
+	results, err := embedder.EmbedDocuments([]string{"hello"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestEmbed_RetryOn429(t *testing.T) {
 
 func TestEmbed_EmptyInput(t *testing.T) {
 	embedder := NewOpenAIEmbedder("key", "text-embedding-3-small")
-	results, err := embedder.Embed(nil)
+	results, err := embedder.EmbedDocuments(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -189,5 +189,41 @@ func TestModelName(t *testing.T) {
 	e := NewOpenAIEmbedder("key", "text-embedding-3-small")
 	if e.ModelName() != "text-embedding-3-small" {
 		t.Errorf("expected text-embedding-3-small, got %s", e.ModelName())
+	}
+}
+
+func TestEmbedQuery(t *testing.T) {
+	srv, embedder := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req embeddingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		resp := embeddingResponse{}
+		for i := range req.Input {
+			resp.Data = append(resp.Data, embeddingData{
+				Embedding: makeEmbedding(1536),
+				Index:     i,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+	defer srv.Close()
+
+	vec, err := embedder.EmbedQuery("hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vec) != 1536 {
+		t.Errorf("expected 1536 dimensions, got %d", len(vec))
+	}
+}
+
+func TestMaxInputTokens(t *testing.T) {
+	e := NewOpenAIEmbedder("key", "text-embedding-3-small")
+	if e.MaxInputTokens() != 0 {
+		t.Errorf("expected 0, got %d", e.MaxInputTokens())
 	}
 }

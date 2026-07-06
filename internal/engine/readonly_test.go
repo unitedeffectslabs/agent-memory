@@ -26,7 +26,7 @@ func TestReadOnlySearch(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return [][]float32{{1.0, 2.0}}, nil
 		},
 	}
@@ -59,7 +59,7 @@ func TestReadOnlySearch_ExplicitParams(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return [][]float32{{1.0}}, nil
 		},
 	}
@@ -74,7 +74,7 @@ func TestReadOnlySearch_ExplicitParams(t *testing.T) {
 func TestReadOnlySearch_EmbedderError(t *testing.T) {
 	ms := &mocks.MockStore{}
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return nil, fmt.Errorf("no API key configured")
 		},
 	}

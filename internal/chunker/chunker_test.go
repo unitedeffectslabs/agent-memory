@@ -213,3 +213,80 @@ func TestChunkTextSimple(t *testing.T) {
 		t.Error("expected non-empty result")
 	}
 }
+
+// fakeTokenizer is a trivial whitespace tokenizer used to verify that a custom
+// tokenizer injected via WithTokenizer is actually used. Each rune becomes a
+// token, so token counts are deterministic and independent of tiktoken.
+type fakeTokenizer struct {
+	encodeCalls int
+}
+
+func (f *fakeTokenizer) Encode(text string) ([]uint32, error) {
+	f.encodeCalls++
+	runes := []rune(text)
+	out := make([]uint32, len(runes))
+	for i, r := range runes {
+		out[i] = uint32(r)
+	}
+	return out, nil
+}
+
+func (f *fakeTokenizer) Decode(tokens []uint32) (string, error) {
+	runes := make([]rune, len(tokens))
+	for i, t := range tokens {
+		runes[i] = rune(t)
+	}
+	return string(runes), nil
+}
+
+func TestWithTokenizerIsHonored(t *testing.T) {
+	ft := &fakeTokenizer{}
+	c := mustNew(t, WithTokenizer(ft), WithChunkSize(3), WithOverlap(0))
+
+	// "abcdef" -> 6 rune-tokens; with size 3 and no overlap -> 2 chunks.
+	results, err := c.ChunkText("abcdef")
+	if err != nil {
+		t.Fatalf("ChunkText() error: %v", err)
+	}
+	if ft.encodeCalls == 0 {
+		t.Fatal("custom tokenizer Encode was never called")
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(results))
+	}
+	if results[0].Content != "abc" || results[1].Content != "def" {
+		t.Errorf("unexpected chunk contents: %q, %q", results[0].Content, results[1].Content)
+	}
+}
+
+func TestWithMaxInputTokensClampsChunkSize(t *testing.T) {
+	// Deterministic tokenizer so chunk boundaries are exact.
+	content := "abcdefghij" // 10 rune-tokens
+
+	// Without clamping: chunkSize 8 -> a single chunk covering all 10? No,
+	// 8 < 10 so two chunks (8 + 2). Establish the baseline first.
+	base := mustNew(t, WithTokenizer(&fakeTokenizer{}), WithChunkSize(8), WithOverlap(0))
+	baseResults, err := base.ChunkText(content)
+	if err != nil {
+		t.Fatalf("ChunkText() error: %v", err)
+	}
+	if len(baseResults) == 0 || baseResults[0].TokenCount != 8 {
+		t.Fatalf("baseline expected first chunk of 8 tokens, got %+v", baseResults)
+	}
+
+	// With clamping to 4: chunks become smaller (max 4 tokens each).
+	clamped := mustNew(t, WithTokenizer(&fakeTokenizer{}), WithChunkSize(8), WithOverlap(0), WithMaxInputTokens(4))
+	clampedResults, err := clamped.ChunkText(content)
+	if err != nil {
+		t.Fatalf("ChunkText() error: %v", err)
+	}
+	for i, r := range clampedResults {
+		if r.TokenCount > 4 {
+			t.Errorf("chunk %d has %d tokens, expected <= 4 after clamping", i, r.TokenCount)
+		}
+	}
+	if len(clampedResults) <= len(baseResults) {
+		t.Errorf("clamping should produce more (smaller) chunks: got %d clamped vs %d base",
+			len(clampedResults), len(baseResults))
+	}
+}

@@ -30,14 +30,14 @@ func (ro *ReadOnlyEngine) Search(params domain.SearchParams) ([]domain.SearchRes
 		params.Threshold = 1.5
 	}
 
-	vectors, err := ro.embedder.Embed([]string{params.Query})
+	vector, err := ro.embedder.EmbedQuery(params.Query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	if len(vectors) == 0 {
+	if len(vector) == 0 {
 		return nil, fmt.Errorf("embedder returned no vectors")
 	}
-	return ro.store.Search(vectors[0], params.Limit, params.Offset, params.Threshold)
+	return ro.store.Search(vector, params.Limit, params.Offset, params.Threshold)
 }
 
 // ListDirectories returns all watched directories from the store.

@@ -52,8 +52,8 @@ type apiError struct {
 	Type    string `json:"type"`
 }
 
-// Embed generates embeddings for the given texts, batching as needed.
-func (e *OpenAIEmbedder) Embed(texts []string) ([][]float32, error) {
+// EmbedDocuments generates embeddings for the given texts, batching as needed.
+func (e *OpenAIEmbedder) EmbedDocuments(texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -141,6 +141,22 @@ func (e *OpenAIEmbedder) callAPI(texts []string) ([]embeddingData, error) {
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
+
+// EmbedQuery generates an embedding for a single query text.
+func (e *OpenAIEmbedder) EmbedQuery(text string) ([]float32, error) {
+	vecs, err := e.EmbedDocuments([]string{text})
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) == 0 {
+		return nil, nil
+	}
+	return vecs[0], nil
+}
+
+// MaxInputTokens returns 0, meaning no practical limit is enforced here.
+// OpenAI's per-input limit is 8191 tokens, well above our chunk sizes.
+func (e *OpenAIEmbedder) MaxInputTokens() int { return 0 }
 
 // Dimensions returns the embedding dimension for the configured model.
 func (e *OpenAIEmbedder) Dimensions() int {
