@@ -444,6 +444,54 @@ and the indexing-progress UX all already exist and are the extension points.
 3. `go vet ./...`, `go test ./...`, `make build`, full manual test both modes.
 4. Update this epic's Status to Complete; record the chosen default model and measured numbers.
 
+## Phase 3 — Detailed Plan (DRAFT, pending Bo review)
+
+Drafted 2026-07-07 as the method-level plan for the Phase 3 outline above. **Not yet built** —
+Phase 3 is the biggest, behavior-changing phase and its architecture decisions want Bo's sign-off
+first. **Recommend delivering as 3 smaller PRs** (3a build/bundling → 3b config/switching → 3c
+safety) to fit the "small PRs, never break anything" model.
+
+### 3a — Build & distribution (no running-app behavior change yet)
+
+| File | Change |
+|---|---|
+| `Makefile` | New `assets` target: download pinned model/tokenizer/ORT-lib into `assets/embedded/` (gitignored), verify SHA-256 vs `assets/manifest.json`. `build` depends on `assets`; passes `-tags localembed` + `CGO_LDFLAGS` for `libtokenizers.a`. |
+| `assets/manifest.json` (new) | Pinned URLs + SHA-256 (in git). |
+| `.gitignore` | `assets/embedded/`. |
+| `internal/embeddings/local/assets_embed.go` (new, `//go:build localembed`) | `go:embed` model+tokenizer+dylib; extract via existing `extractAndVerify` to `~/.agent-memory/runtime/<fingerprint>/`; `resolveAssets` falls back to this when no dev dir/env is set. |
+| `internal/embeddings/local/assets_embed_stub.go` (new, `//go:build !localembed`) | "no embedded assets" → keeps default build small/green. |
+
+**Verify:** `make assets && make build` runs the local model offline; plain `go test ./...` stays green/lib-free.
+
+### 3b — Config, factory & provider switching (local becomes default)
+
+| File | Change (method-level) |
+|---|---|
+| `app.go` | `EmbedderFactory` → `func(provider, apiKey, model) (embeddings.Embedder, error)`. `SetConfig` gains `embedding_provider` case: swap embedder **and chunker** → `engine.Reset()`. Provider-aware `embedding_model`/`openai_api_key` handling. |
+| `internal/engine/engine.go` | **Add `SetChunker(c chunker.Chunker)`** (Open Concern #1) — provider switch swaps tokenizer/chunker atomically with the embedder. |
+| `main.go` | Both branches read `embedding_provider`, build via factory (`local`→`local.New`, `openai`→`NewOpenAIEmbedder`); GUI wires embedder-matched tokenizer into chunker (`WithTokenizer` + `WithMaxInputTokens`); **stdio stays lazy**. |
+| `internal/embeddings/defaults.go` (new) | Centralize `defaultModel(provider)` / `defaultDimension(provider, model)` (Open Concern #4) — remove scattered `"text-embedding-3-small"`/`1536` hardcodes. |
+
+**Verify:** fresh DB indexes a test folder fully offline; provider switch local↔openai triggers reset + re-index.
+
+### 3c — Safety, store & Stats
+
+| File | Change |
+|---|---|
+| `internal/store/sqlite.go` | `migrate()`/`Reset()` create `chunk_embeddings` at the active provider's dimension (passed in — see Decision 2), not hardcoded. `Stats()` reports `embedding_provider`+`embedding_model` from config (layering fix). |
+| `app.go` | Write `embedding_fingerprint` (`provider:model:dim`) on each index run; check at GUI startup → mismatch surfaces "re-index required", not garbage. |
+| `internal/engine/readonly.go` | Read-only dimension guard (Open Concern #2): compare embedder `Dimensions()`/fingerprint to stored table; mismatch → actionable error, not raw sqlite-vec failure. |
+| `internal/mcp/server.go` | `index_status` gains a `provider` field (from `Stats`). |
+| threshold | Confirm sqlite-vec metric; provider-aware default threshold from Phase 0 numbers (~0.25 local), centralized (Open Concern #5). |
+
+**Verify:** existing OpenAI-vectored DB hits the fingerprint-mismatch path (not garbage); `--mcp` returns a clear error on dimension mismatch.
+
+### Decisions needing Bo's sign-off
+
+1. **`make build` now requires native libs + `-tags localembed`** (via `make assets`, ~150 MB); binary ~26 MB → ~180 MB. Epic accepts this — confirm.
+2. **Store dimension: reorder the composition root** so `main.go` resolves provider/model/dimension up front and **passes the dimension into the store**, rather than `migrate()` hardcoding it — avoids a new hardcode *and* keeps `store` from importing `embeddings`. Touches wiring order.
+3. **Existing-user handling:** when `embedding_provider` is unset on an upgraded DB with OpenAI vectors + a key → default to **openai** (preserve their setup), not local. Full onboarding migration is Phase 4; the resolution rule starts here.
+
 ## Risks
 
 | Risk | Severity | Mitigation |
