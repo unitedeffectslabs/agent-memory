@@ -340,11 +340,27 @@ and the indexing-progress UX all already exist and are the extension points.
 
 | File | Purpose |
 |---|---|
-| `internal/embeddings/local/local.go` | `LocalEmbedder` (lazy ONNX session, tokenize→infer→pool→normalize, prefixes) |
-| `internal/embeddings/local/assets.go` | `go:embed` + extract-to-`~/.agent-memory/runtime/` with checksums |
-| `internal/embeddings/local/local_test.go` | Unit tests + build-tagged integration test |
-| `internal/chunker/hf_tokenizer.go` (or similar) | HF tokenizer adapter satisfying `chunker.Tokenizer` |
-| `assets/manifest.json` | Pinned artifact URLs + SHA-256 (in git) |
+| `internal/embeddings/local/local.go` | `LocalEmbedder` (implements `Embedder`): prefixes, sub-batching, tensor assembly (incl. zero `token_type_ids`), mean-pool, L2-normalize, lazy-session orchestration. **Pure Go, no build tag** — unit-tested via fake session/tokenizer seams. |
+| `internal/embeddings/local/session_ort.go` | **(`//go:build localembed`)** real ONNX Runtime session via `onnxruntime_go` (thread cap + arena limit). |
+| `internal/embeddings/local/tokenizer_hf.go` | **(`//go:build localembed`)** HF tokenizer via `daulet/tokenizers` + the `chunker.Tokenizer` adapter. **Relocated here from `internal/chunker/` (Phase 2 decision — see below)** to keep the pure-Go `chunker` package CGo-free. |
+| `internal/embeddings/local/assets.go` | asset resolution + checksummed atomic extraction to `~/.agent-memory/runtime/<fingerprint>/`. Source = dev env path (`AGENT_MEMORY_LOCAL_ASSETS`) in Phase 2; swapped to `go:embed` in Phase 3. |
+| `internal/embeddings/local/local_test.go` | unit tests (fake session+tokenizer, no tag, always run) + `//go:build localembed` integration test. |
+| `assets/manifest.json` | Pinned artifact URLs + SHA-256 (in git) — populated in Phase 3. |
+
+**Phase 2 implementation decisions (recorded 2026-07-07, per the "update the tables, don't silently diverge" rule):**
+
+1. **CGo isolation via a `//go:build localembed` tag + interface seams.** The ONNX/tokenizer
+   infrastructure (which requires native libs) lives in tagged files behind `onnxSession` /
+   `tokenizer` interfaces; the pure pipeline logic and unit tests carry no tag. This keeps the
+   default `go build ./...` / `go test ./...` (and CI) green and native-lib-free through Phase 2;
+   `make build` gains the tag + `CGO_LDFLAGS` in Phase 3. Reinforces the architecture rules
+   (interfaces at boundaries, mocks for all seams).
+2. **HF tokenizer adapter moved from `internal/chunker/` to `internal/embeddings/local/`.** Placing
+   the CGo-dependent adapter in the `chunker` package would force that pure-Go domain package (and
+   its always-run tests) to require the native tokenizer lib. `main.go` injects it via the
+   `chunker.WithTokenizer` seam. Better honors separation of concerns than the original placement.
+3. **Phase 2 sources assets from a dev path** (env var), not `go:embed`; weights/libs are never
+   committed. `go:embed` + `make assets` + manifest land in Phase 3.
 
 ### Explicitly unchanged
 
