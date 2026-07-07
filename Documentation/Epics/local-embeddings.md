@@ -1,7 +1,7 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** In Progress — Phase 1 complete; entering Phase 2
+**Status:** In Progress — Phase 2 complete; entering Phase 3
 **Owner:** Bo Motlagh
 
 ## Goal
