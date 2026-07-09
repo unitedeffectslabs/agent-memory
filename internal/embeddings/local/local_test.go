@@ -276,10 +276,13 @@ func TestResolveAssetsMissing(t *testing.T) {
 	if _, _, _, err := resolveAssets(Config{AssetsDir: t.TempDir()}); err == nil {
 		t.Fatal("expected error for empty assets dir")
 	}
-	// no dir and no env
+	// No dir and no env. Without embedded assets (default build) this is an
+	// error; in the localembed build the go:embed-ed set is the valid fallback,
+	// so success is expected there.
 	t.Setenv(assetsDirEnv, "")
-	if _, _, _, err := resolveAssets(Config{}); err == nil {
-		t.Fatal("expected error when no assets dir configured")
+	_, _, _, err := resolveAssets(Config{})
+	if !assetsEmbedded && err == nil {
+		t.Fatal("expected error when no assets dir configured and none embedded")
 	}
 }
 

@@ -4,7 +4,6 @@ package local
 
 import (
 	"math"
-	"os"
 	"testing"
 )
 
@@ -13,8 +12,11 @@ import (
 // directory (AGENT_MEMORY_LOCAL_ASSETS), so it only builds under the
 // `localembed` tag and skips if assets are absent.
 func TestIntegrationEmbed(t *testing.T) {
-	if os.Getenv(assetsDirEnv) == "" {
-		t.Skipf("set %s to the assets dir to run the integration test", assetsDirEnv)
+	// Assets come from either the dev override (AGENT_MEMORY_LOCAL_ASSETS) or the
+	// go:embed-ed set (present in every localembed build). Skip only if neither
+	// resolves — proving the embed->extract path when run with no override set.
+	if _, _, _, err := resolveAssets(Config{}); err != nil {
+		t.Skipf("no local assets available: %v", err)
 	}
 
 	e := New(Config{Threads: 2, BatchSize: 8})

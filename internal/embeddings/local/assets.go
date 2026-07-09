@@ -30,18 +30,36 @@ var dylibCandidates = []string{
 }
 
 // resolveAssets locates the model, tokenizer and ONNX Runtime shared library.
-// The base directory comes from cfg.AssetsDir, falling back to the
-// AGENT_MEMORY_LOCAL_ASSETS environment variable. All three paths must exist.
+//
+// Priority:
+//  1. A developer override — cfg.AssetsDir, falling back to the
+//     AGENT_MEMORY_LOCAL_ASSETS environment variable — points at a directory
+//     that already holds the three files.
+//  2. Otherwise, the assets bundled into the binary via go:embed (localembed
+//     build only) are extracted to ~/.agent-memory/runtime/<fingerprint>/ and
+//     resolved from there. In the default (untagged) build no assets are
+//     embedded, so extractEmbeddedAssets returns an error and resolveAssets
+//     fails with an actionable message.
 func resolveAssets(cfg Config) (modelPath, tokPath, dylibPath string, err error) {
 	base := cfg.AssetsDir
 	if base == "" {
 		base = os.Getenv(assetsDirEnv)
 	}
 	if base == "" {
-		return "", "", "", fmt.Errorf(
-			"local: no assets directory configured (set Config.AssetsDir or %s)", assetsDirEnv)
+		// No dev override: fall back to the go:embed-ed, extracted assets.
+		extracted, eerr := extractEmbeddedAssets()
+		if eerr != nil {
+			return "", "", "", eerr
+		}
+		base = extracted
 	}
+	return resolveFromDir(base)
+}
 
+// resolveFromDir resolves the three asset paths from a directory, requiring the
+// model and tokenizer files to be present and at least one ONNX Runtime shared
+// library to be found.
+func resolveFromDir(base string) (modelPath, tokPath, dylibPath string, err error) {
 	modelPath = filepath.Join(base, assetModelFile)
 	tokPath = filepath.Join(base, assetTokenizerFile)
 
