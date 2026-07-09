@@ -13,13 +13,26 @@ import (
 	"github.com/borzou/vecstore/internal/domain"
 )
 
+// defaultVecDimension is the fallback embedding dimension used when a caller
+// does not supply one (dim <= 0). It matches OpenAI text-embedding-3-small,
+// preserving the historical schema for databases created before dimensions
+// were provider-driven.
+const defaultVecDimension = 1536
+
 // SQLiteStore implements Store using SQLite + sqlite-vec.
 type SQLiteStore struct {
 	db *sql.DB
 }
 
-// NewSQLiteStore opens (or creates) a SQLite database at dbPath and initializes the schema.
-func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
+// NewSQLiteStore opens (or creates) a SQLite database at dbPath and initializes
+// the schema. dim sets the width of the vector table for a freshly created
+// database; a value <= 0 falls back to defaultVecDimension. Existing databases
+// are unaffected — the vector table is created with CREATE ... IF NOT EXISTS, so
+// the stored dimension always wins for an already-migrated DB.
+func NewSQLiteStore(dbPath string, dim int) (*SQLiteStore, error) {
+	if dim <= 0 {
+		dim = defaultVecDimension
+	}
 	sqlite_vec.Auto()
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
@@ -31,14 +44,14 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &SQLiteStore{db: db}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(dim); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return s, nil
 }
 
-func (s *SQLiteStore) migrate() error {
+func (s *SQLiteStore) migrate(dim int) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS config (
 			key   TEXT PRIMARY KEY,
@@ -68,10 +81,10 @@ func (s *SQLiteStore) migrate() error {
 			token_count INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 		)`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_embeddings USING vec0(
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_embeddings USING vec0(
 			chunk_id  INTEGER PRIMARY KEY,
-			embedding FLOAT[1536]
-		)`,
+			embedding FLOAT[%d]
+		)`, dim),
 		`CREATE TABLE IF NOT EXISTS activity_log (
 			id        INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp DATETIME NOT NULL,
@@ -392,7 +405,7 @@ func (s *SQLiteStore) ListLogEntries(limit, offset int) ([]domain.ActivityLogEnt
 // directories are preserved so the user doesn't have to re-onboard.
 func (s *SQLiteStore) Reset(embeddingDimension int) error {
 	if embeddingDimension <= 0 {
-		embeddingDimension = 1536
+		embeddingDimension = defaultVecDimension
 	}
 
 	stmts := []string{

@@ -11,7 +11,7 @@ import (
 func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := NewSQLiteStore(filepath.Join(dir, "test.db"))
+	s, err := NewSQLiteStore(filepath.Join(dir, "test.db"), 1536)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -246,6 +246,48 @@ func TestReset(t *testing.T) {
 	val, _ := s.GetConfig("k")
 	if val != "v" {
 		t.Fatalf("config should be preserved after reset, got %q", val)
+	}
+}
+
+func TestNewSQLiteStoreDimension(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "dim.db")
+
+	// Fresh DB created at 384 dims should accept a 384-wide embedding.
+	s, err := NewSQLiteStore(dbPath, 384)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(384): %v", err)
+	}
+	s.AddDirectory("/tmp/a")
+	dirs, _ := s.ListDirectories()
+	f := domain.File{DirectoryID: dirs[0].ID, Path: "/tmp/a/f.txt", Hash: "h", IndexedAt: time.Now().UTC()}
+	s.UpsertFile(f)
+	got, _ := s.GetFileByPath("/tmp/a/f.txt")
+
+	emb := make([]float32, 384)
+	emb[0] = 1
+	if err := s.InsertChunks(got.ID, []domain.Chunk{{Index: 0, Content: "x", TokenCount: 1, Embedding: emb}}); err != nil {
+		t.Fatalf("InsertChunks(384): %v", err)
+	}
+	s.Close()
+
+	// Reopening with a different dim must NOT change the existing table.
+	s2, err := NewSQLiteStore(dbPath, 1536)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	stats, _ := s2.Stats()
+	if stats.TotalChunks != 1 {
+		t.Fatalf("existing 384-dim data should survive reopen, got %d chunks", stats.TotalChunks)
+	}
+	// A 384-wide query still matches — table width was preserved as 384.
+	res, err := s2.Search(emb, 5, 0, 0)
+	if err != nil {
+		t.Fatalf("Search on preserved 384 table: %v", err)
+	}
+	if len(res) == 0 {
+		t.Fatal("expected a result from the preserved 384-dim table")
 	}
 }
 

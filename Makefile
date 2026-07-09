@@ -15,8 +15,8 @@ PLATFORM  := $(shell go env GOOS)-$(shell go env GOARCH)
 build: assets
 	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed
 
-dev:
-	wails dev
+dev: assets
+	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails dev -tags localembed
 
 test:
 	go test ./...

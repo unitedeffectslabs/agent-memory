@@ -74,6 +74,13 @@ func (eng *Engine) SetEmbedder(e embeddings.Embedder) {
 	eng.embedder = e
 }
 
+// SetChunker swaps the chunker. A provider switch must swap the chunker
+// alongside the embedder so the tokenizer and max-input clamp match the new
+// model. Must be called while the engine is stopped.
+func (eng *Engine) SetChunker(c chunker.Chunker) {
+	eng.chunker = c
+}
+
 // GetIgnorePatterns returns the current ignore pattern list. If none have been
 // configured yet, it seeds and persists the defaults.
 func (eng *Engine) GetIgnorePatterns() ([]string, error) {
