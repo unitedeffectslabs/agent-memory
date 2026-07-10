@@ -125,6 +125,19 @@ func main() {
 		log.Fatalf("persist embedding_model: %v", err)
 	}
 
+	// 3b. Backfill onboarding_complete for pre-existing users. If the flag has
+	//     never been set but the DB already has watched directories or an OpenAI
+	//     key, this is an upgraded install that should skip onboarding. A truly
+	//     fresh DB (no dirs, no key) leaves the flag unset so onboarding runs.
+	if complete, _ := s.GetConfig("onboarding_complete"); complete == "" {
+		dirs, _ := s.ListDirectories()
+		if len(dirs) > 0 || apiKey != "" {
+			if err := s.SetConfig("onboarding_complete", "true"); err != nil {
+				log.Fatalf("persist onboarding_complete: %v", err)
+			}
+		}
+	}
+
 	// 4. Create the provider-matched embedder and chunker.
 	embedder, err := makeEmbedder(provider, apiKey, model)
 	if err != nil {
