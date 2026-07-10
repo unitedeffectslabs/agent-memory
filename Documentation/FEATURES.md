@@ -2,7 +2,7 @@
 
 ## Core Pipeline
 
-**Directory watching and indexing.** Add directories via the GUI or MCP. The engine walks each directory, filters by ignore patterns and supported file types, then runs the pipeline: extract text -> chunk -> embed via OpenAI -> store vectors in SQLite. File content is hashed (SHA-256) so unchanged files are skipped on subsequent scans.
+**Directory watching and indexing.** Add directories via the GUI or MCP. The engine walks each directory, filters by ignore patterns and supported file types, then runs the pipeline: extract text -> chunk -> embed (via the active provider — local by default) -> store vectors in SQLite. File content is hashed (SHA-256) so unchanged files are skipped on subsequent scans.
 
 **Semantic search.** Query text is embedded, then matched against stored vectors using KNN (sqlite-vec cosine distance). Returns ranked results with file path, chunk text, and similarity score. Available via MCP `search` tool.
 
@@ -24,11 +24,15 @@ Token-based splitting using tiktoken (cl100k_base encoding). Configurable chunk 
 
 ## Embedding
 
-OpenAI API client supporting `text-embedding-3-small` (1536 dimensions) and `text-embedding-3-large` (3072 dimensions). Batches up to 2048 inputs per API call. Retries with exponential backoff on rate limits (max 3 retries). The engine further batches by token count (250K tokens per batch) to stay within API limits.
+Two providers, selectable in Settings. Both satisfy the same `Embedder` interface, so the rest of the pipeline is provider-agnostic.
 
-**Model switching.** Changing the embedding model via Settings drops the vector table, recreates it with the new dimension, and re-indexes everything. The embedder is hot-swapped so no restart is needed.
+**Local (default).** A bundled `multilingual-e5-small` model (384 dimensions, ~100 languages) runs in-process on the CPU via ONNX Runtime. Works fully offline — no API key, no network calls. The model, tokenizer, and runtime library are bundled into the app; onboarding requires no key.
 
-**API key changes.** Updating the OpenAI API key immediately swaps the embedder so new requests use the updated key.
+**OpenAI (opt-in).** OpenAI API client supporting `text-embedding-3-small` (1536 dimensions) and `text-embedding-3-large` (3072 dimensions). Enabled by adding an API key in Settings. Batches up to 2048 inputs per API call. Retries with exponential backoff on rate limits (max 3 retries). The engine further batches by token count (250K tokens per batch) to stay within API limits.
+
+**Provider & model switching.** Changing the provider or model via Settings drops the vector table, recreates it with the new dimension, and re-indexes everything (vectors from different models are incompatible). The embedder is hot-swapped so no restart is needed.
+
+**API key changes.** Updating the OpenAI API key (while the OpenAI provider is active) immediately swaps the embedder so new requests use the updated key.
 
 ## Ignore Patterns
 
@@ -68,7 +72,7 @@ Both implement the MCP protocol: `initialize` handshake, `tools/list`, and `tool
 
 Wails v2 with React frontend. Native webview, no browser required.
 
-**Onboarding** — first-launch flow: API key entry, directory picker, then dashboard.
+**Onboarding** — first-launch flow: welcome, directory picker, then dashboard. No API key required — the local provider works out of the box. Opting into OpenAI is done later in Settings.
 
 **Dashboard** — total files, chunks, last indexed time, indexing progress bar, embedding model display.
 
@@ -76,7 +80,7 @@ Wails v2 with React frontend. Native webview, no browser required.
 
 **Controls** — Start/Stop/Restart/Reset buttons. Reset clears all vectors and re-indexes (with confirmation dialog).
 
-**Settings** — API key (masked), model picker, chunk size/overlap, MCP port, auth token display with rotate button.
+**Settings** — embedding provider selector (local default vs OpenAI); when OpenAI is selected, an API key field (masked) and model picker appear. Plus chunk size/overlap, MCP port, and auth token display with rotate button. Switching provider re-indexes everything.
 
 **Activity Log** — paginated log of indexing events (indexed, ignored, deleted, errors).
 
@@ -97,7 +101,7 @@ The config path is customizable for non-standard installs. Claude Desktop launch
 
 - HTTP server binds to `127.0.0.1` only — no network exposure.
 - Bearer token auth on all MCP HTTP requests. Token auto-generated, stored in SQLite, rotatable via GUI.
-- Only outbound traffic is HTTPS to `api.openai.com`.
+- No outbound traffic by default — the local embedding provider runs in-process. Outbound HTTPS to `api.openai.com` occurs only if the OpenAI provider is opted into.
 - GUI uses native webview IPC — no localhost web server for the UI.
 - SQLite file uses standard filesystem permissions.
 
@@ -111,7 +115,7 @@ All settings are stored in the SQLite `config` table and manageable from the GUI
 
 **MCP server port:** Default `9847`. Binds to `127.0.0.1` only.
 
-**Embedding model:** `text-embedding-3-small` (1536 dimensions) by default. Switch to `text-embedding-3-large` (3072 dimensions) in Settings. Changing the model re-indexes everything.
+**Embedding provider & model:** local `multilingual-e5-small` (384 dimensions) by default. Switch to the OpenAI provider in Settings to use `text-embedding-3-small` (1536 dimensions) or `text-embedding-3-large` (3072 dimensions), which require an API key. Changing the provider or model re-indexes everything.
 
 **Chunk size:** 512 tokens default, configurable. Overlap: 50 tokens default, configurable.
 

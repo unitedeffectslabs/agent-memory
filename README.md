@@ -6,7 +6,7 @@ Works as a standalone file tracker/indexer and as an MCP server that gives Claud
 
 ## How It Works
 
-1. **Launch the app** and enter your OpenAI API key in the onboarding screen (used for generating embeddings — your files never leave your machine except as embedding API calls).
+1. **Launch the app.** It works out of the box with a bundled local embedding model — no API key, no account, no network calls. Onboarding is just: welcome → add folders → done. (You *can* opt into OpenAI embeddings later in Settings if you prefer; see below.)
 2. **Add directories** you want indexed. The app watches them in real time — new files, edits, and deletions are picked up automatically.
 3. **Search your files**, connect Claude Desktop so it can search your files during conversations.
 
@@ -23,19 +23,26 @@ Under the hood, Claude Desktop launches the app as a subprocess (`--mcp` flag) t
 - **PDFs** — text content extraction
 - **Media & archives** — metadata only (file name, size, dimensions, contents list)
 
-Files are chunked into ~512-token segments (configurable), embedded via OpenAI, and stored as vectors. Unchanged files (matched by SHA-256 hash) are skipped on re-scan.
+Files are chunked into ~512-token segments (configurable), embedded by the active provider (local by default), and stored as vectors. Unchanged files (matched by SHA-256 hash) are skipped on re-scan.
 
 ### Supported Embedding Models
 
-- `text-embedding-3-small` (1536 dimensions) — default, faster, cheaper
+**Local (default, opt-out):**
+
+- `multilingual-e5-small` (384 dimensions) — bundled into the app, runs in-process on the CPU, ~100 languages. Works fully offline: no API key, no account, no network calls.
+
+**OpenAI (opt-in):** enable in Settings by adding an API key. Higher retrieval quality, at a per-request cost; sends text to `api.openai.com`.
+
+- `text-embedding-3-small` (1536 dimensions) — faster, cheaper
 - `text-embedding-3-large` (3072 dimensions) — higher quality, more expensive
 
-Switching models in Settings re-indexes everything (vectors from different models are incompatible).
+Switching provider or model in Settings re-indexes everything (vectors from different models are incompatible).
 
 ### Privacy & Security
 
+- **No outbound network calls by default** — the local embedding model runs entirely on your machine, so with the default provider nothing ever leaves your computer.
 - All data stays local in `~/.agent-memory/agent-memory.db`
-- The only outbound network call is to `api.openai.com` for embeddings
+- The only outbound network call is to `api.openai.com` for embeddings — and only if you opt into the OpenAI provider in Settings.
 - The MCP HTTP server binds to `127.0.0.1` only (never exposed to the network)
 - The stdio transport (Claude Desktop) uses process-level isolation — no network at all
 
@@ -48,9 +55,10 @@ Switching models in Settings re-indexes everything (vectors from different model
 - Go 1.24+
 - Wails v2 CLI (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`)
 - Node.js 18+ and npm (for the frontend build)
-- OpenAI API key
+- Network access on the first build — `make build` runs `make assets`, which downloads the pinned local model, tokenizer, and ONNX Runtime library (~150 MB, checksummed against `assets/manifest.json`) into the gitignored `assets/embedded/`. Cached after the first run.
+- OpenAI API key — optional, only needed if you opt into the OpenAI provider at runtime
 - macOS, Linux, or Windows
-- CGo enabled (required for SQLite + sqlite-vec; default on macOS/Linux, may need `CC=gcc` on Windows)
+- CGo enabled (required for SQLite + sqlite-vec, and for the local embedder's native libraries; default on macOS/Linux, may need `CC=gcc` on Windows)
 
 ### Local Development
 
@@ -73,6 +81,8 @@ make build      # recommended — skips slow binding generation
 make test       # run all Go tests
 make clean      # remove build artifacts
 ```
+
+`make build` depends on `make assets` (downloads the local model/tokenizer/ORT libraries, ~150 MB, on the first run) and builds with the `localembed` build tag plus the `CGO_LDFLAGS` needed to link the native libraries. The resulting binary is ~180 MB (it bundles the embedding model). `make test` runs the default, native-lib-free build — the `localembed`-tagged code is isolated so plain `go test ./...` needs no assets.
 
 Or manually:
 
