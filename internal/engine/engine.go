@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -393,7 +394,11 @@ func (eng *Engine) Search(params domain.SearchParams) ([]domain.SearchResult, er
 		params.Limit = 10
 	}
 	if params.Threshold <= 0 {
-		params.Threshold = 1.5
+		provider, _ := eng.store.GetConfig("embedding_provider")
+		if provider == "" {
+			provider = embeddings.DefaultProvider()
+		}
+		params.Threshold = embeddings.DefaultThreshold(provider)
 	}
 
 	vector, err := eng.embedder.EmbedQuery(params.Query)
@@ -626,6 +631,10 @@ func (eng *Engine) initialScan() {
 		}
 	}
 	log.Printf("engine: initial scan complete — %d files processed, %d errors", len(filePaths), errored)
+
+	// Record the dimension the index was built with so read-only consumers can
+	// detect an embedding-model mismatch before querying sqlite-vec.
+	eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions()))
 }
 
 // stopped reports whether Stop has been called (i.e. stopCh is closed).
@@ -680,6 +689,9 @@ func (eng *Engine) Reset() error {
 	if err := eng.store.Reset(eng.embedder.Dimensions()); err != nil {
 		return err
 	}
+	// Record the dimension the index was (re)built with so read-only consumers
+	// can detect an embedding-model mismatch before querying sqlite-vec.
+	eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions()))
 	return eng.Start()
 }
 

@@ -46,3 +46,24 @@ func DefaultDimension(provider, model string) int {
 		return localDimension
 	}
 }
+
+// DefaultThreshold returns the default maximum distance for search results for a
+// given provider. Results farther than this are excluded when a caller does not
+// supply an explicit threshold.
+//
+// sqlite-vec's vec0 tables use cosine distance by default, and our embedding
+// vectors are L2-normalized, so cosine distance is the correct metric to
+// threshold on for both providers.
+func DefaultThreshold(provider string) float32 {
+	switch provider {
+	case ProviderOpenAI:
+		return 1.5
+	default:
+		// ProviderLocal (and any unrecognized provider). This is an initial
+		// value derived from the Phase 0 spike's cosine-distance ranges for the
+		// multilingual-e5-small model (related ~0.13–0.18, cross-lingual
+		// ~0.17–0.22, unrelated ~0.29). It is intentionally conservative and is
+		// tunable pending real-corpus evaluation.
+		return 0.6
+	}
+}

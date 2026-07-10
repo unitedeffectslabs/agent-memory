@@ -331,7 +331,7 @@ func getToolDefinitions() []toolDefinition {
 					},
 					"threshold": map[string]interface{}{
 						"type":        "number",
-						"description": "Maximum cosine distance for results. Lower values mean stricter matching. Default: 1.5. Set to 0 to disable filtering.",
+						"description": "Maximum cosine distance for results. Lower values mean stricter matching. The default is provider-dependent (tuned per embedding provider). Set to 0 to use the provider default; use a positive value to override it.",
 					},
 				},
 				"required": []string{"query"},
@@ -375,7 +375,7 @@ func getToolDefinitions() []toolDefinition {
 		},
 		{
 			Name:        "index_status",
-			Description: "Returns total files, total chunks, last indexed timestamp, currently indexing flag, and embedding model in use.",
+			Description: "Returns total files, total chunks, last indexed timestamp, currently indexing flag, and the active embedding provider and model in use.",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},
@@ -504,7 +504,7 @@ func getReadOnlyToolDefinitions() []toolDefinition {
 					},
 					"threshold": map[string]interface{}{
 						"type":        "number",
-						"description": "Maximum cosine distance for results. Lower values mean stricter matching. Default: 1.5. Set to 0 to disable filtering.",
+						"description": "Maximum cosine distance for results. Lower values mean stricter matching. The default is provider-dependent (tuned per embedding provider). Set to 0 to use the provider default; use a positive value to override it.",
 					},
 				},
 				"required": []string{"query"},
@@ -520,7 +520,7 @@ func getReadOnlyToolDefinitions() []toolDefinition {
 		},
 		{
 			Name:        "index_status",
-			Description: "Returns total files, total chunks, last indexed timestamp, currently indexing flag, and embedding model in use.",
+			Description: "Returns total files, total chunks, last indexed timestamp, currently indexing flag, and the active embedding provider and model in use.",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},

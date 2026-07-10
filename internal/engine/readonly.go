@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/borzou/vecstore/internal/domain"
 	"github.com/borzou/vecstore/internal/embeddings"
@@ -26,8 +27,22 @@ func (ro *ReadOnlyEngine) Search(params domain.SearchParams) ([]domain.SearchRes
 	if params.Limit <= 0 {
 		params.Limit = 10
 	}
+
+	provider, _ := ro.store.GetConfig("embedding_provider")
+	if provider == "" {
+		provider = embeddings.DefaultProvider()
+	}
 	if params.Threshold <= 0 {
-		params.Threshold = 1.5
+		params.Threshold = embeddings.DefaultThreshold(provider)
+	}
+
+	// Guard against querying sqlite-vec with a vector whose dimension does not
+	// match the index. This happens when the index was built with a different
+	// embedding model than the one this read-only process is configured with.
+	if dimStr, _ := ro.store.GetConfig("embedding_dimension"); dimStr != "" {
+		if indexDim, convErr := strconv.Atoi(dimStr); convErr == nil && indexDim != ro.embedder.Dimensions() {
+			return nil, fmt.Errorf("index was built with a different embedding model (dim %d) than the active provider (dim %d) — reopen the GUI app to rebuild the index", indexDim, ro.embedder.Dimensions())
+		}
 	}
 
 	vector, err := ro.embedder.EmbedQuery(params.Query)

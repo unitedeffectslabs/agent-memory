@@ -54,6 +54,7 @@ type IndexStats struct {
 	TotalChunks    int
 	LastIndexedAt  time.Time
 	IsIndexing     bool
+	Provider       string
 	EmbeddingModel string
 	// Progress tracking during indexing
 	IndexedFiles int // files processed so far in current run

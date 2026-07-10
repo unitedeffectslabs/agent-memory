@@ -226,6 +226,20 @@ func TestStats(t *testing.T) {
 	if stats.TotalChunks != 1 {
 		t.Fatalf("want 1 chunk, got %d", stats.TotalChunks)
 	}
+
+	// Provider/model are reported straight from config; empty when unset.
+	if stats.Provider != "" || stats.EmbeddingModel != "" {
+		t.Fatalf("want empty provider/model when unconfigured, got %q/%q", stats.Provider, stats.EmbeddingModel)
+	}
+	s.SetConfig("embedding_provider", "local")
+	s.SetConfig("embedding_model", "multilingual-e5-small")
+	stats, _ = s.Stats()
+	if stats.Provider != "local" {
+		t.Fatalf("want provider 'local', got %q", stats.Provider)
+	}
+	if stats.EmbeddingModel != "multilingual-e5-small" {
+		t.Fatalf("want model 'multilingual-e5-small', got %q", stats.EmbeddingModel)
+	}
 }
 
 func TestReset(t *testing.T) {

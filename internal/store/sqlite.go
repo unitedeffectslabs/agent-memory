@@ -351,11 +351,11 @@ func (s *SQLiteStore) Stats() (domain.IndexStats, error) {
 		stats.LastIndexedAt = parseTimestamp(lastIndexed.String)
 	}
 
-	model, _ := s.GetConfig("embedding_model")
-	if model == "" {
-		model = "text-embedding-3-small"
-	}
-	stats.EmbeddingModel = model
+	// Report the active provider/model straight from config. When config is
+	// empty (never configured) the fields are left empty rather than assuming a
+	// specific default, since the composition root owns provider selection.
+	stats.Provider, _ = s.GetConfig("embedding_provider")
+	stats.EmbeddingModel, _ = s.GetConfig("embedding_model")
 
 	return stats, nil
 }
