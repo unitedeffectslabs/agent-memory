@@ -1,7 +1,7 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** In Progress — Phase 3 complete (local is the default; 3a/3b/3c done); entering Phase 4 (frontend + docs)
+**Status:** In Progress — Phase 4 complete (keyless onboarding + provider UI + docs); Phase 5 (cross-platform) + Phase 6 (cleanup) remain
 **Owner:** Bo Motlagh
 
 ## Goal
