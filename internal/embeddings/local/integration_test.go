@@ -79,3 +79,15 @@ func cosine(a, b []float32) float64 {
 	}
 	return dot
 }
+
+// TestOrtLibFileIsKnownCandidate is a tripwire for future platform files: the
+// per-platform ortLibFile must be a name findDylib recognizes, so a developer
+// override directory populated with the same artifacts always resolves.
+func TestOrtLibFileIsKnownCandidate(t *testing.T) {
+	for _, name := range dylibCandidates {
+		if name == ortLibFile {
+			return
+		}
+	}
+	t.Fatalf("ortLibFile %q is not in dylibCandidates %v", ortLibFile, dylibCandidates)
+}

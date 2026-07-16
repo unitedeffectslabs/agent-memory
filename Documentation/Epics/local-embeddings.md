@@ -1,7 +1,7 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** In Progress — Phase 4 complete (keyless onboarding + provider UI + docs); Phase 5 (cross-platform) + Phase 6 (cleanup) remain
+**Status:** In Progress — Phase 5 started (foundation: per-platform go:embed split, branch `feat/xplat-foundation`); Phases 0–4 complete and in PR #2 (draft, awaiting review); Phase 6 (cleanup) remains
 **Owner:** Bo Motlagh
 
 ## Goal
@@ -425,6 +425,21 @@ and the indexing-progress UX all already exist and are the extension points.
    Claude Desktop via stdio → switch to OpenAI in Settings → re-index → switch back.
 
 ### Phase 5 — Cross-platform builds
+
+**Execution decisions (recorded 2026-07-16, per the "update the tables, don't silently diverge" rule):**
+
+- **Delivered as small stacked PRs** (Bo's small-PRs rule; the epic doesn't mandate one PR):
+  foundation → Linux → macOS x86_64 → Windows. Windows moved last purely for convenience
+  (only target needing a second machine for the Rust tokenizer build); no dependency reason.
+- **Foundation PR (`feat/xplat-foundation`)** implements Open Concern #8: the ORT shared
+  library's `go:embed` moves from `assets_embed.go` into per-platform
+  `assets_embed_<GOOS>_<GOARCH>.go` files (each defines `embeddedORTLib` + `ortLibFile`;
+  darwin-arm64 first). Model + tokenizer stay in the shared embed (platform-independent
+  bytes). Each later platform PR adds one sibling file + manifest entries only.
+- **Makefile checksum portability**: `shasum -a 256` (macOS-only) replaced by a `SHA256`
+  variable that picks `sha256sum` on Linux — prerequisite for `make assets` inside Docker/CI.
+- `dylibCandidates` gains the versioned Linux name (`libonnxruntime.so.1.26.0`) that the
+  official Linux tarball actually ships.
 
 1. Linux x64/arm64: assets manifest entries, CI build, smoke test.
 2. Windows x64: CI job builds `libtokenizers.a` with Rust toolchain (no published binary);

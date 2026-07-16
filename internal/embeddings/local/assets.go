@@ -21,10 +21,14 @@ const (
 )
 
 // dylibCandidates are the ONNX Runtime shared-library file names we look for,
-// most specific first.
+// most specific first. Used only for developer-override directories
+// (Config.AssetsDir / AGENT_MEMORY_LOCAL_ASSETS); the bundled path resolves the
+// per-platform ortLibFile directly. The Linux release tarball ships the
+// versioned name (libonnxruntime.so.1.26.0), hence both .so forms.
 var dylibCandidates = []string{
 	"libonnxruntime.1.26.0.dylib",
 	"libonnxruntime.dylib",
+	"libonnxruntime.so.1.26.0",
 	"libonnxruntime.so",
 	"onnxruntime.dll",
 }

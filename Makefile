@@ -11,6 +11,9 @@ LOCAL_DIR := internal/embeddings/local
 EMBED_DIR := $(LOCAL_DIR)/embedded
 LIB_DIR   := $(LOCAL_DIR)/lib
 PLATFORM  := $(shell go env GOOS)-$(shell go env GOARCH)
+# Portable SHA-256: macOS ships shasum, Linux ships sha256sum. Both print
+# "<hash>  <file>", so the awk '{print $1}' callers work with either.
+SHA256    := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo shasum -a 256)
 
 build: assets
 	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed
@@ -41,14 +44,14 @@ assets:
 	  destpath=$(LOCAL_DIR)/$$dest; \
 	  want=$$sha; [ -n "$$membersha" ] && want=$$membersha; \
 	  if [ -f "$$destpath" ]; then \
-	    have=$$(shasum -a 256 "$$destpath" | awk '{print $$1}'); \
+	    have=$$($(SHA256) "$$destpath" | awk '{print $$1}'); \
 	    if [ "$$have" = "$$want" ]; then echo "   ok (cached)  $$dest"; continue; fi; \
 	    echo "   stale, refetching  $$dest"; \
 	  fi; \
 	  echo "   downloading  $$key -> $$dest"; \
 	  tmp=$$(mktemp); \
 	  curl -fsSL -o "$$tmp" "$$url"; \
-	  got=$$(shasum -a 256 "$$tmp" | awk '{print $$1}'); \
+	  got=$$($(SHA256) "$$tmp" | awk '{print $$1}'); \
 	  if [ "$$got" != "$$sha" ]; then \
 	    echo "ERROR: archive checksum mismatch for $$key: got $$got want $$sha"; rm -f "$$tmp"; exit 1; \
 	  fi; \
@@ -58,7 +61,7 @@ assets:
 	    tar xzf "$$tmp" -C "$$xd" "$$member"; \
 	    cp "$$xd/$$member" "$$destpath"; \
 	    rm -rf "$$xd"; \
-	    got2=$$(shasum -a 256 "$$destpath" | awk '{print $$1}'); \
+	    got2=$$($(SHA256) "$$destpath" | awk '{print $$1}'); \
 	    if [ "$$got2" != "$$membersha" ]; then \
 	      echo "ERROR: member checksum mismatch for $$key: got $$got2 want $$membersha"; rm -f "$$tmp"; exit 1; \
 	    fi; \

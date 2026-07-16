@@ -9,9 +9,13 @@ import (
 	"path/filepath"
 )
 
-// embeddedAssets carries the runtime assets compiled into the binary. These are
+// embeddedAssets carries the platform-independent runtime assets compiled into
+// the binary (model + tokenizer — identical bytes on every platform). They are
 // downloaded and checksum-verified by `make assets` into ./embedded/ before the
 // tagged build compiles (the go:embed directive requires the files to exist).
+// The platform-specific ONNX Runtime shared library is embedded separately in
+// the per-platform assets_embed_<GOOS>_<GOARCH>.go file (embeddedORTLib /
+// ortLibFile).
 //
 // NOTE: go:embed can only reach files inside this package's own directory tree,
 // so the runtime assets live under internal/embeddings/local/embedded/ — NOT the
@@ -23,7 +27,6 @@ import (
 //
 //go:embed embedded/model_quantized.onnx
 //go:embed embedded/tokenizer.json
-//go:embed embedded/libonnxruntime.1.26.0.dylib
 var embeddedAssets embed.FS
 
 // assetsEmbedded reports whether bundled assets are compiled into this build.
@@ -31,12 +34,17 @@ var embeddedAssets embed.FS
 // the "no override configured" outcome across the two builds.
 const assetsEmbedded = true
 
-// embeddedAssetPaths are the embed.FS paths of the runtime assets, in the order
-// they are extracted. Each is written to disk under its base name.
-var embeddedAssetPaths = []string{
-	"embedded/" + assetModelFile,
-	"embedded/" + assetTokenizerFile,
-	"embedded/" + dylibCandidates[0], // libonnxruntime.1.26.0.dylib
+// embeddedAssetSources pairs each runtime asset's embed.FS with its path, in
+// extraction order. Each is written to disk under its base name. Model and
+// tokenizer come from the shared embeddedAssets; the ONNX Runtime library comes
+// from the per-platform embeddedORTLib.
+var embeddedAssetSources = []struct {
+	fs   *embed.FS
+	path string
+}{
+	{&embeddedAssets, "embedded/" + assetModelFile},
+	{&embeddedAssets, "embedded/" + assetTokenizerFile},
+	{&embeddedORTLib, "embedded/" + ortLibFile},
 }
 
 // extractEmbeddedAssets materializes the go:embed-ed runtime assets into
@@ -52,8 +60,9 @@ func extractEmbeddedAssets() (string, error) {
 	destDir := filepath.Join(home, ".agent-memory", "runtime",
 		fingerprint("local", modelName, modelDim))
 
-	for _, embedPath := range embeddedAssetPaths {
-		data, err := embeddedAssets.ReadFile(embedPath)
+	for _, src := range embeddedAssetSources {
+		embedPath := src.path
+		data, err := src.fs.ReadFile(embedPath)
 		if err != nil {
 			return "", fmt.Errorf("local: read embedded asset %s: %w", embedPath, err)
 		}
