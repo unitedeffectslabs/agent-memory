@@ -2,7 +2,7 @@
 
 **Date found:** 2026-07-16
 **Found during:** local-embeddings epic, Phase 5 Linux verification (first-ever test run on Linux)
-**Status:** Open — documented, not yet fixed
+**Status:** Fix submitted — PR #5 (`fix/watcher-create-swallowed-linux`, based on `main`, independent of the epic PR stack)
 **Severity:** Low today (no user-visible breakage), latent correctness risk
 
 ## Symptom
@@ -40,7 +40,7 @@ so the swallow never manifests there.
   breaks on Linux only.
 - Blocks a fully green `go test ./...` on Linux (Phase 5 verify gate) until fixed.
 
-## Suggested fix (not applied)
+## Fix (applied in PR #5)
 
 In the debouncer, **accumulate the fsnotify op bits per path** instead of replacing
 the closure — e.g. keep `pendingOps map[string]fsnotify.Op`, OR-ing each event's op;
@@ -49,5 +49,6 @@ from the merged bits, then clear the entry. Semantics on macOS are unchanged
 (single-op case degenerates to today's behavior); Linux create+write merges to
 Create. `TestOnCreate` then passes on both platforms.
 
-Fix belongs in its own small PR (per working rules); the watcher is outside the
-local-embeddings epic's scope ("explicitly unchanged" list).
+Fix delivered as its own small PR per working rules (the watcher is outside the
+local-embeddings epic's scope): **PR #5**. Verified there: watcher suite 3/3 pass
+on Linux arm64 (was 3/3 fail) and 3/3 pass on macOS.
