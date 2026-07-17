@@ -535,7 +535,19 @@ and the indexing-progress UX all already exist and are the extension points.
 2. Architecture rule check per `Documentation/ARCHITECTURE.md` (inward deps, wiring in main.go,
    mocks for all interfaces, thin delivery layer).
 3. `go vet ./...`, `go test ./...`, `make build`, full manual test both modes.
-4. Update this epic's Status to Complete; record the chosen default model and measured numbers.
+4. **Verification gaps carried from Phase 5** (recorded 2026-07-17 — coverage gaps, not known
+   defects; each Phase 5 platform's core inference + search path IS verified):
+   - [ ] **Windows GUI smoke** (~5 min, human at the PC screen — headless SSH couldn't do it):
+     launch `agent-memory.exe`, keyless onboarding, index a folder, search from the UI.
+     All Windows verification so far was headless (MCP stdio path only).
+   - [ ] **Full untagged `go test ./...` on Windows** — only the tagged integration test has
+     run there. Do this AFTER the watcher fix (PR #5) merges: Windows file events likely
+     produce the same create+write double-event as Linux, so `TestOnCreate` presumably fails
+     on the unfixed watcher (unverified assumption — confirm).
+   - [ ] **linux-amd64 runtime smoke** (~10 min on any x64 Linux box, e.g. the Pop!_OS
+     machine): artifacts are pinned + checksum-verified, but the on-device run (build or
+     copy the exe, index, search) hasn't happened; Linux verification ran on arm64.
+5. Update this epic's Status to Complete; record the chosen default model and measured numbers.
 
 ## Phase 3 — Detailed Plan (DRAFT, pending Bo review)
 
