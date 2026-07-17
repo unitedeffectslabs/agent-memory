@@ -1,7 +1,10 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** In Progress — Phase 5 started (foundation: per-platform go:embed split, branch `feat/xplat-foundation`); Phases 0–4 complete and in PR #2 (draft, awaiting review); Phase 6 (cleanup) remains
+**Status:** In Progress — Phase 5 nearly complete: all four targets built & verified (macOS
+arm64 shipped in PR #2; Linux, macOS x86_64, Windows x64 in stacked PRs #3/#4/#6/#7). Only the
+linux-amd64 *runtime* smoke (artifacts pinned, needs an x64 Linux box) and Phase 6 (cleanup)
+remain. PRs all draft, awaiting Bo's review.
 **Owner:** Bo Motlagh
 
 ## Goal
@@ -485,6 +488,36 @@ and the indexing-progress UX all already exist and are the extension points.
   `GOARCH=amd64 make assets` downloads + checksum-verifies from the repo release; full
   x86_64 Wails app builds, extracts its assets to its own arch dir, and answers an MCP
   search correctly with both arch dirs coexisting. Native arm64 re-verified after.
+
+**Windows x64 findings (recorded 2026-07-17, branch `feat/xplat-windows`):**
+
+- **Built on-device over SSH** (Tailscale) to the Windows PC, driven from the dev Mac.
+  Toolchain installed via scoop: Go 1.26.5, MinGW gcc 16.1.0, rustup-gnu + cargo 1.97.1,
+  make. Recipe + provenance in `Documentation/windows-build.md`.
+- **libtokenizers.a source-built** (no upstream Windows prebuilt): `daulet/tokenizers` v1.27.0
+  tag, **GNU** Rust toolchain (must match MinGW gcc; MSVC would produce an unlinkable `.lib`).
+  The v1.27.0 layout emits `libtokenizers_ffi.a` — renamed to `libtokenizers.a` on packaging.
+  Published as repo release **`tokenizers-1.27.0-windows-x64`**, SHA-256 pinned. ONNX Runtime
+  DLL is the **official** Microsoft `onnxruntime-win-x64-1.26.0.zip` (member-pinned).
+- **`assets_embed_windows.go`** embeds `onnxruntime.dll`; **Makefile** learned to extract
+  `.zip` archives (unzip → Windows `tar.exe` fallback) so `make assets` runs on Windows.
+- **Two Windows-only build gaps found and fixed in the Makefile** (both invisible on
+  macOS/Linux, guarded by `GOOS=windows`):
+  1. The Rust static lib needs NT/Winsock/crypto syscall libs MinGW doesn't link by default
+     (`undefined reference to Nt*/Rtl*`) → `LINK_LIBS` appends `-lntdll -lws2_32 -lbcrypt
+     -luserenv -ladvapi32 -lkernel32 -lncrypt`.
+  2. sqlite-vec's cgo `#include "sqlite3.h"` has no system header on Windows (macOS SDK /
+     Linux libsqlite3 supplied it) → new `winhdr` step stages the headers mattn/go-sqlite3
+     bundles (its `sqlite3-binding.h` IS the amalgamation `sqlite3.h`) into `build/winhdr`,
+     version-matched to the SQLite mattn compiles in.
+- **Verified natively on Windows x64:** `make assets` downloads + checksum-verifies all four
+  artifacts (incl. `.zip` extraction and our published tokenizer release); integration test
+  links and passes (cosine ordering 0.140 < 0.171 < 0.286, matching every platform); full
+  `make build` produces `agent-memory.exe` (193 MB PE32+ GUI); the exe extracts its embedded
+  assets to `windows-amd64-<fingerprint>/` and answers an MCP search on a Mac-indexed DB
+  ("how do I cook italian pasta" → carbonara-recipe.md) — cross-platform vector compatibility
+  confirmed. (Network not forcibly disabled — SSH session — but the local provider makes no
+  outbound calls by design; the `--network none` Linux/Intel runs already proved that property.)
 
 1. Linux x64/arm64: assets manifest entries, CI build, smoke test.
 2. Windows x64: CI job builds `libtokenizers.a` with Rust toolchain (no published binary);
