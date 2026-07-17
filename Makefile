@@ -1,4 +1,4 @@
-.PHONY: build build-darwin-amd64 dev test clean assets
+.PHONY: build build-darwin-amd64 dev test clean assets winhdr
 
 # --- Local-embedding asset bundling -----------------------------------------
 # Artifacts (model, tokenizer, ONNX Runtime dylib, static tokenizer lib) are
@@ -20,12 +20,30 @@ SHA256    := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || e
 # Naming them here resolves "undefined reference to Nt*/Rtl*" at link time.
 # Empty on macOS/Linux, so those builds are unaffected.
 LINK_LIBS := -ltokenizers
+CGO_EXTRA_CFLAGS :=
+WIN_PREREQ :=
 ifeq ($(shell go env GOOS),windows)
 LINK_LIBS += -lntdll -lws2_32 -lbcrypt -luserenv -ladvapi32 -lkernel32 -lncrypt
+# sqlite-vec's cgo build #includes sqlite3.h / sqlite3ext.h, which macOS and
+# Linux supply from the system but Windows does not. Stage the exact headers
+# mattn/go-sqlite3 bundles (its sqlite3-binding.h IS the amalgamation sqlite3.h),
+# so they match the SQLite that mattn compiles in — see the winhdr target.
+CGO_EXTRA_CFLAGS := -I$(PWD)/build/winhdr
+WIN_PREREQ := winhdr
 endif
 
-build: assets
-	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) $(LINK_LIBS)" wails build -skipbindings -tags localembed
+# Stage sqlite headers for the Windows build from the mattn/go-sqlite3 module
+# (Windows has no system sqlite3.h). No-op / unused on macOS and Linux.
+winhdr:
+	@mkdir -p "$(PWD)/build/winhdr"
+	@d=$$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3); \
+	  d=$$(cygpath -u "$$d" 2>/dev/null || echo "$$d"); \
+	  cp "$$d/sqlite3-binding.h" "$(PWD)/build/winhdr/sqlite3.h"; \
+	  cp "$$d/sqlite3ext.h" "$(PWD)/build/winhdr/sqlite3ext.h"; \
+	  echo ">> staged Windows sqlite headers from $$d"
+
+build: assets $(WIN_PREREQ)
+	CGO_CFLAGS="$(CGO_EXTRA_CFLAGS)" CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) $(LINK_LIBS)" wails build -skipbindings -tags localembed
 
 # Cross-build the Intel-mac app from an arm64 Mac. GOARCH=amd64 makes the
 # assets target fetch the darwin-amd64 artifacts (the embedded/ and lib/ dirs
@@ -35,8 +53,8 @@ build-darwin-amd64:
 	GOARCH=amd64 $(MAKE) assets
 	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed -platform darwin/amd64
 
-dev: assets
-	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) $(LINK_LIBS)" wails dev -tags localembed
+dev: assets $(WIN_PREREQ)
+	CGO_CFLAGS="$(CGO_EXTRA_CFLAGS)" CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) $(LINK_LIBS)" wails dev -tags localembed
 
 test:
 	go test ./...
