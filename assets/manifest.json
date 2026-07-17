@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Pinned local-embedding artifacts (URLs + SHA-256). Weights/libs are NEVER committed; `make assets` downloads and checksum-verifies these into internal/embeddings/local/embedded/ (go:embed runtime assets) and internal/embeddings/local/lib/ (link-time static lib). For tarball artifacts, `sha256` is the checksum of the downloaded archive and `member_sha256` is the checksum of the extracted member. `dest` is relative to internal/embeddings/local/. Only darwin-arm64 is populated in Phase 3a; other platforms land in Phase 5.",
+  "comment": "Pinned local-embedding artifacts (URLs + SHA-256). Weights/libs are NEVER committed; `make assets` downloads and checksum-verifies these into internal/embeddings/local/embedded/ (go:embed runtime assets) and internal/embeddings/local/lib/ (link-time static lib). For tarball artifacts, `sha256` is the checksum of the downloaded archive and `member_sha256` is the checksum of the extracted member. `dest` is relative to internal/embeddings/local/. Model + tokenizer entries are identical bytes on every platform (per-platform keyed for a uniform `make assets`). Remaining Phase 5 platforms: windows-amd64, darwin-amd64.",
   "platforms": {
     "darwin-arm64": {
       "model": {
@@ -25,6 +25,58 @@
         "sha256": "fb84b8b2e349a5952767ffe80ccd862fc44084de47f3b0cc3f0b7c9d4e649cf7",
         "member": "libtokenizers.a",
         "member_sha256": "c91ae814afb8fe4f000099972208f60c3aa2d13899a7cd5a31fee2e9e2efbac7",
+        "dest": "lib/libtokenizers.a"
+      }
+    },
+    "linux-arm64": {
+      "model": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx",
+        "sha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+        "dest": "embedded/model_quantized.onnx"
+      },
+      "tokenizer": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/tokenizer.json",
+        "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+        "dest": "embedded/tokenizer.json"
+      },
+      "onnxruntime": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-linux-aarch64-1.26.0.tgz",
+        "sha256": "34ff1c2d0f12e2cf3d33a0c5f82e39792e1d581fbd6968fd7c30d173654be01a",
+        "member": "onnxruntime-linux-aarch64-1.26.0/lib/libonnxruntime.so.1.26.0",
+        "member_sha256": "115ecb838e703d390262b8b4d07d5248e6693c67658d4c98c48f94905ab27af4",
+        "dest": "embedded/libonnxruntime.so.1.26.0"
+      },
+      "tokenizers_static": {
+        "url": "https://github.com/daulet/tokenizers/releases/download/v1.27.0/libtokenizers.linux-arm64.tar.gz",
+        "sha256": "e96545ad05930c26f51f63d932ee6d3bbd32bbed149e102c5290d587a2293067",
+        "member": "libtokenizers.a",
+        "member_sha256": "aa4d3a7d28023e439fa7a645fb606195acafb5c33c8cd01928ed1aacfc4c074e",
+        "dest": "lib/libtokenizers.a"
+      }
+    },
+    "linux-amd64": {
+      "model": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx",
+        "sha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+        "dest": "embedded/model_quantized.onnx"
+      },
+      "tokenizer": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/tokenizer.json",
+        "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+        "dest": "embedded/tokenizer.json"
+      },
+      "onnxruntime": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-linux-x64-1.26.0.tgz",
+        "sha256": "1254da24fb389cf39dc0ff3451ab48301740ffbfcbaf646849df92f80ee92c57",
+        "member": "onnxruntime-linux-x64-1.26.0/lib/libonnxruntime.so.1.26.0",
+        "member_sha256": "5bd5bedf736fc501692435d0ec4f6e8b2bdf48cd30af8e6d00d61b3ddc9a7ab8",
+        "dest": "embedded/libonnxruntime.so.1.26.0"
+      },
+      "tokenizers_static": {
+        "url": "https://github.com/daulet/tokenizers/releases/download/v1.27.0/libtokenizers.linux-amd64.tar.gz",
+        "sha256": "72556cdca798dd4ea7cdaba308e5f0d68a8cb93b67c96edf485b7a0edd7b07f4",
+        "member": "libtokenizers.a",
+        "member_sha256": "e6862b31745bb7d07980fcee70e49cd3b4318097609180f5d2d3fb394f305d50",
         "dest": "lib/libtokenizers.a"
       }
     }

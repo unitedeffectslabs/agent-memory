@@ -365,8 +365,10 @@ and the indexing-progress UX all already exist and are the extension points.
 ### Explicitly unchanged
 
 `internal/watcher/`, `internal/extractor/`, `internal/mcp/dispatch.go`, `internal/mcp/stdio.go`
-(interface types unchanged — `ReadOnlyEngineService` signature is stable), `tray.go`,
+(interface types unchanged — `ReadOnlyEngineService` signature is stable),
 `internal/store/sqlite_readonly.go`, all search/KNN logic in `store.Search`.
+(~~`tray.go`~~ — removed from this list in Phase 5: it required a `//go:build darwin` guard
++ non-darwin stub to compile anywhere but macOS; see Phase 5 Linux findings.)
 
 ### Known dead-code risks to check at the end
 
@@ -440,6 +442,25 @@ and the indexing-progress UX all already exist and are the extension points.
   variable that picks `sha256sum` on Linux — prerequisite for `make assets` inside Docker/CI.
 - `dylibCandidates` gains the versioned Linux name (`libonnxruntime.so.1.26.0`) that the
   official Linux tarball actually ships.
+
+**Linux findings (recorded 2026-07-16, branch `feat/xplat-linux`):**
+
+- **`tray.go` was never darwin-guarded** — its Cocoa CGo preamble compiled on every platform,
+  making *any* non-macOS build impossible. Fixed here (`//go:build darwin` + no-op
+  `tray_stub.go`); this removes tray.go from the "Explicitly unchanged" list (deviation
+  recorded per the rules — CLAUDE.md already declared it macOS-only in intent).
+- **Pre-existing watcher bug surfaced by first-ever Linux test run:** inotify emits
+  CREATE+WRITE for a new file; the per-path debouncer replaces rather than merges events, so
+  OnCreate is swallowed (OnModify fires instead — no user impact today since both index the
+  file). Documented in `Documentation/Bugs/fswatcher-create-event-swallowed-linux.md`;
+  fix deliberately kept out of this epic's PRs (watcher is out of scope).
+- **linux-arm64 verified end-to-end** in Docker (golang:1.26-bookworm): `make assets`
+  checksums, test suite (watcher known-fail excepted), real int8 inference (cosine ordering
+  0.140 < 0.171 < 0.286, matching Phase 0), full Wails build (webkit2gtk-4.1 via the
+  `webkit2_41` tag), and an offline (`--network none`) MCP search that retrieved correct
+  semantic matches from a macOS-indexed DB — cross-platform vector compatibility confirmed.
+- **linux-amd64**: artifacts pinned and checksum-verified; runtime smoke still pending
+  (needs an x64 Linux env — Docker on the arm64 dev Mac would run it under slow emulation).
 
 1. Linux x64/arm64: assets manifest entries, CI build, smoke test.
 2. Windows x64: CI job builds `libtokenizers.a` with Rust toolchain (no published binary);
