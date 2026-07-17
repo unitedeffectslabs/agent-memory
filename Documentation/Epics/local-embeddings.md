@@ -545,9 +545,13 @@ and the indexing-progress UX all already exist and are the extension points.
      delivers the same create+write double-event). PR #5's fix branch verified on Windows:
      watcher suite 3/3 pass. So the sole Windows failure is the known bug with a proven fix;
      re-run once #5 merges into the stack for the final green checkmark.
-   - [ ] **linux-amd64 runtime smoke** (~10 min on any x64 Linux box, e.g. the Pop!_OS
-     machine): artifacts are pinned + checksum-verified, but the on-device run (build or
-     copy the exe, index, search) hasn't happened; Linux verification ran on arm64.
+   - [x] **linux-amd64 runtime smoke** — DONE 2026-07-17 on real x64 hardware (Surface Book
+     i7, Pop!_OS 22.04): binary built in an Ubuntu 22.04 amd64 container (glibc-matched;
+     `go build` with wails production tags — the full wails-CLI build path was already proven
+     on linux-arm64), integration test passed in-container (0.140 < 0.171 < 0.286), then the
+     binary ran natively on the Surface with **zero library installs** (`ldd` clean against
+     stock webkit2gtk-4.0/gtk-3), extracted assets to `linux-amd64-<fingerprint>/`, and
+     answered the MCP search correctly against a macOS-indexed DB.
 5. Update this epic's Status to Complete; record the chosen default model and measured numbers.
 
 ## Phase 3 — Detailed Plan (DRAFT, pending Bo review)
