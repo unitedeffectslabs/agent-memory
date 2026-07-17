@@ -540,10 +540,11 @@ and the indexing-progress UX all already exist and are the extension points.
    - [ ] **Windows GUI smoke** (~5 min, human at the PC screen — headless SSH couldn't do it):
      launch `agent-memory.exe`, keyless onboarding, index a folder, search from the UI.
      All Windows verification so far was headless (MCP stdio path only).
-   - [ ] **Full untagged `go test ./...` on Windows** — only the tagged integration test has
-     run there. Do this AFTER the watcher fix (PR #5) merges: Windows file events likely
-     produce the same create+write double-event as Linux, so `TestOnCreate` presumably fails
-     on the unfixed watcher (unverified assumption — confirm).
+   - [x] **Full untagged `go test ./...` on Windows** — DONE 2026-07-17: every package green
+     except `TestOnCreate`, which fails exactly as on Linux (assumption CONFIRMED — Windows
+     delivers the same create+write double-event). PR #5's fix branch verified on Windows:
+     watcher suite 3/3 pass. So the sole Windows failure is the known bug with a proven fix;
+     re-run once #5 merges into the stack for the final green checkmark.
    - [ ] **linux-amd64 runtime smoke** (~10 min on any x64 Linux box, e.g. the Pop!_OS
      machine): artifacts are pinned + checksum-verified, but the on-device run (build or
      copy the exe, index, search) hasn't happened; Linux verification ran on arm64.
