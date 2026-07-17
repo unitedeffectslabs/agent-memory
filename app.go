@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 
 	"github.com/borzou/vecstore/internal/chunker"
@@ -384,10 +385,28 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// defaultClaudeDesktopConfigPath returns the standard Claude Desktop config location.
+// defaultClaudeDesktopConfigPath returns the standard Claude Desktop config
+// location for the current OS. Claude Desktop reads a different path per
+// platform; writing the macOS path on Windows produces a config it never sees
+// (while still reporting success — the Phase 5 Windows smoke caught exactly that).
 func defaultClaudeDesktopConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	switch goruntime.GOOS {
+	case "windows":
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return filepath.Join(appData, "Claude", "claude_desktop_config.json")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	default: // linux
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, "Claude", "claude_desktop_config.json")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".config", "Claude", "claude_desktop_config.json")
+	}
 }
 
 // GetClaudeDesktopConfigPath returns the current config path (custom or default).
