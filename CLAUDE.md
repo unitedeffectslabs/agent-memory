@@ -7,6 +7,7 @@ Local-first desktop app + MCP server for semantic file search. Watches directori
 ```bash
 make assets         # download pinned local model/tokenizer/ORT libs into assets/embedded/ (~150 MB, checksummed via assets/manifest.json)
 make build          # wails build -skipbindings, builds with -tags localembed (DO NOT use plain `wails build` — hangs on binding generation due to CGo)
+make build-darwin-amd64  # cross-build the Intel-mac app from an arm64 Mac (swaps in darwin-amd64 assets)
 make dev            # hot-reload dev mode
 make test           # go test ./... (default build, no localembed tag — stays native-lib-free)
 make clean          # rm -rf build/bin

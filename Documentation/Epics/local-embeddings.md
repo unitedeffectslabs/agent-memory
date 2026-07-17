@@ -462,6 +462,30 @@ and the indexing-progress UX all already exist and are the extension points.
 - **linux-amd64**: artifacts pinned and checksum-verified; runtime smoke still pending
   (needs an x64 Linux env — Docker on the arm64 dev Mac would run it under slow emulation).
 
+**macOS x86_64 findings (recorded 2026-07-17, branch `feat/xplat-macos-intel`):**
+
+- **ORT 1.26.0 source-built for mac-Intel** exactly as planned (official prebuilts stopped at
+  1.23): cross-compiled from the arm64 dev Mac (`./build.sh --config Release --osx_arch x86_64
+  --build_shared_lib --skip_tests`; needs CMake ≥4 ok, Python ≥3.10 — system 3.9 fails on
+  `match` syntax). 27.5 MB dylib, published as repo release **`ort-1.26.0-darwin-x64`**
+  (prerelease, reproducible recipe in its notes), pinned in the manifest like every artifact.
+- **Darwin embed file consolidated**: `assets_embed_darwin_arm64.go` →
+  `assets_embed_darwin.go` (`localembed && darwin`) — both mac arches share the dylib file
+  name, mirroring the Linux single-file pattern; the arch difference is which artifact
+  `make assets` fetches.
+- **New `make build-darwin-amd64`** target cross-builds the Intel app from an arm64 Mac
+  (GOARCH=amd64 assets fetch + `wails build -platform darwin/amd64`).
+- **Arch-collision bug found and fixed before ship:** the runtime extraction dir
+  (`~/.agent-memory/runtime/<fingerprint>/`) was not arch-namespaced, so an Intel build (or a
+  home dir migrated from an Intel Mac) poisoned the arm64 build's dlopen with an
+  incompatible-architecture dylib. Extraction dirs are now `<GOOS>-<GOARCH>-<fingerprint>`.
+  No user impact (the extraction scheme never shipped — it exists only in this PR stack).
+- **Verified under Rosetta 2 on the arm64 dev Mac:** integration test passes as an x86_64
+  binary (cosine ordering 0.140 < 0.171 < 0.288, matching all other platforms);
+  `GOARCH=amd64 make assets` downloads + checksum-verifies from the repo release; full
+  x86_64 Wails app builds, extracts its assets to its own arch dir, and answers an MCP
+  search correctly with both arch dirs coexisting. Native arm64 re-verified after.
+
 1. Linux x64/arm64: assets manifest entries, CI build, smoke test.
 2. Windows x64: CI job builds `libtokenizers.a` with Rust toolchain (no published binary);
    ORT DLL from official release; smoke test.

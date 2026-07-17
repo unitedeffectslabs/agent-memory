@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // embeddedAssets carries the platform-independent runtime assets compiled into
@@ -57,8 +58,15 @@ func extractEmbeddedAssets() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("local: locate home dir: %w", err)
 	}
+	// The directory is namespaced by GOOS-GOARCH in addition to the model
+	// fingerprint: the ORT shared library is architecture-specific, and two
+	// builds sharing one home directory is a real scenario (an Intel-mac build
+	// under Rosetta, or a home directory migrated from an Intel Mac). Without
+	// the arch in the path, the first build's extraction poisons the second's
+	// dlopen with an incompatible-architecture error.
 	destDir := filepath.Join(home, ".agent-memory", "runtime",
-		fingerprint("local", modelName, modelDim))
+		fmt.Sprintf("%s-%s-%s", runtime.GOOS, runtime.GOARCH,
+			fingerprint("local", modelName, modelDim)))
 
 	for _, src := range embeddedAssetSources {
 		embedPath := src.path

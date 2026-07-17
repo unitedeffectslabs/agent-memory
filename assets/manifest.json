@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Pinned local-embedding artifacts (URLs + SHA-256). Weights/libs are NEVER committed; `make assets` downloads and checksum-verifies these into internal/embeddings/local/embedded/ (go:embed runtime assets) and internal/embeddings/local/lib/ (link-time static lib). For tarball artifacts, `sha256` is the checksum of the downloaded archive and `member_sha256` is the checksum of the extracted member. `dest` is relative to internal/embeddings/local/. Model + tokenizer entries are identical bytes on every platform (per-platform keyed for a uniform `make assets`). Remaining Phase 5 platforms: windows-amd64, darwin-amd64.",
+  "comment": "Pinned local-embedding artifacts (URLs + SHA-256). Weights/libs are NEVER committed; `make assets` downloads and checksum-verifies these into internal/embeddings/local/embedded/ (go:embed runtime assets) and internal/embeddings/local/lib/ (link-time static lib). For tarball artifacts, `sha256` is the checksum of the downloaded archive and `member_sha256` is the checksum of the extracted member. `dest` is relative to internal/embeddings/local/. Model + tokenizer entries are identical bytes on every platform (per-platform keyed for a uniform `make assets`). Remaining Phase 5 platform: windows-amd64. darwin-amd64's onnxruntime is our own source build (official mac-Intel prebuilts stopped at ORT 1.23) hosted in this repo's GitHub releases — see the ort-1.26.0-darwin-x64 release notes for the reproducible recipe.",
   "platforms": {
     "darwin-arm64": {
       "model": {
@@ -25,6 +25,32 @@
         "sha256": "fb84b8b2e349a5952767ffe80ccd862fc44084de47f3b0cc3f0b7c9d4e649cf7",
         "member": "libtokenizers.a",
         "member_sha256": "c91ae814afb8fe4f000099972208f60c3aa2d13899a7cd5a31fee2e9e2efbac7",
+        "dest": "lib/libtokenizers.a"
+      }
+    },
+    "darwin-amd64": {
+      "model": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx",
+        "sha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+        "dest": "embedded/model_quantized.onnx"
+      },
+      "tokenizer": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/tokenizer.json",
+        "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+        "dest": "embedded/tokenizer.json"
+      },
+      "onnxruntime": {
+        "url": "https://github.com/unitedeffectslabs/agent-memory/releases/download/ort-1.26.0-darwin-x64/onnxruntime-osx-x86_64-1.26.0-uelabs.tgz",
+        "sha256": "a78e1d8c0183833bf21f23440b0b36ae3cd4f99dbfac470249ec41768493f2b8",
+        "member": "libonnxruntime.1.26.0.dylib",
+        "member_sha256": "e29a80a09a41def826f3b31519978944a6ab5c3dc0613124a1863ff49eefce9b",
+        "dest": "embedded/libonnxruntime.1.26.0.dylib"
+      },
+      "tokenizers_static": {
+        "url": "https://github.com/daulet/tokenizers/releases/download/v1.27.0/libtokenizers.darwin-x86_64.tar.gz",
+        "sha256": "6239efe5a81fde8089ef2df8ae710366542b4e5deab6d8ecb74d7d1862db2ddb",
+        "member": "libtokenizers.a",
+        "member_sha256": "c8b1f9ac68193f185a0d09ffc2e8d8892ebcfc71aad6318ffdbd6dce11d05460",
         "dest": "lib/libtokenizers.a"
       }
     },

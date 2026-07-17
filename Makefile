@@ -1,4 +1,4 @@
-.PHONY: build dev test clean assets
+.PHONY: build build-darwin-amd64 dev test clean assets
 
 # --- Local-embedding asset bundling -----------------------------------------
 # Artifacts (model, tokenizer, ONNX Runtime dylib, static tokenizer lib) are
@@ -17,6 +17,14 @@ SHA256    := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || e
 
 build: assets
 	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed
+
+# Cross-build the Intel-mac app from an arm64 Mac. GOARCH=amd64 makes the
+# assets target fetch the darwin-amd64 artifacts (the embedded/ and lib/ dirs
+# hold ONE platform at a time — the checksum check refetches on arch switch,
+# so alternating with `make build` is safe, just re-downloads).
+build-darwin-amd64:
+	GOARCH=amd64 $(MAKE) assets
+	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed -platform darwin/amd64
 
 dev: assets
 	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails dev -tags localembed
