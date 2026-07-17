@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Pinned local-embedding artifacts (URLs + SHA-256). Weights/libs are NEVER committed; `make assets` downloads and checksum-verifies these into internal/embeddings/local/embedded/ (go:embed runtime assets) and internal/embeddings/local/lib/ (link-time static lib). For tarball artifacts, `sha256` is the checksum of the downloaded archive and `member_sha256` is the checksum of the extracted member. `dest` is relative to internal/embeddings/local/. Model + tokenizer entries are identical bytes on every platform (per-platform keyed for a uniform `make assets`). Remaining Phase 5 platform: windows-amd64. darwin-amd64's onnxruntime is our own source build (official mac-Intel prebuilts stopped at ORT 1.23) hosted in this repo's GitHub releases — see the ort-1.26.0-darwin-x64 release notes for the reproducible recipe.",
+  "comment": "Pinned local-embedding artifacts (URLs + SHA-256). Weights/libs are NEVER committed; `make assets` downloads and checksum-verifies these into internal/embeddings/local/embedded/ (go:embed runtime assets) and internal/embeddings/local/lib/ (link-time static lib). For tarball artifacts, `sha256` is the checksum of the downloaded archive and `member_sha256` is the checksum of the extracted member. `dest` is relative to internal/embeddings/local/. Model + tokenizer entries are identical bytes on every platform (per-platform keyed for a uniform `make assets`). darwin-amd64's onnxruntime is our own source build (official mac-Intel prebuilts stopped at ORT 1.23) hosted in this repo's GitHub releases — see the ort-1.26.0-darwin-x64 release notes for the reproducible recipe. windows-amd64's tokenizers_static has no upstream prebuilt: it is built from Rust source per Documentation/windows-build.md and hosted in this repo's releases (tokenizers-1.27.0-windows-x64).",
   "platforms": {
     "darwin-arm64": {
       "model": {
@@ -25,6 +25,32 @@
         "sha256": "fb84b8b2e349a5952767ffe80ccd862fc44084de47f3b0cc3f0b7c9d4e649cf7",
         "member": "libtokenizers.a",
         "member_sha256": "c91ae814afb8fe4f000099972208f60c3aa2d13899a7cd5a31fee2e9e2efbac7",
+        "dest": "lib/libtokenizers.a"
+      }
+    },
+    "windows-amd64": {
+      "model": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx",
+        "sha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+        "dest": "embedded/model_quantized.onnx"
+      },
+      "tokenizer": {
+        "url": "https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/tokenizer.json",
+        "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+        "dest": "embedded/tokenizer.json"
+      },
+      "onnxruntime": {
+        "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-win-x64-1.26.0.zip",
+        "sha256": "6ebe99b5564bf4d029b6e93eac9ff423682b6212eade769e9ca3f685eaf500b4",
+        "member": "onnxruntime-win-x64-1.26.0/lib/onnxruntime.dll",
+        "member_sha256": "b2ba7ca16e0e4fe71ad5148744ab885a2f5809e52a0c3de4d9ba3853a03977f9",
+        "dest": "embedded/onnxruntime.dll"
+      },
+      "tokenizers_static": {
+        "url": "https://github.com/unitedeffectslabs/agent-memory/releases/download/tokenizers-1.27.0-windows-x64/libtokenizers.windows-x86_64.tar.gz",
+        "sha256": "882f520174a6cb14dcf4dca559375d65915a69a075bd85c22e40463bc0b466a8",
+        "member": "libtokenizers.a",
+        "member_sha256": "5e0815434a9d9eea40638ae9303f239c85059868673dc7e2a5a1eee72a9ad692",
         "dest": "lib/libtokenizers.a"
       }
     },

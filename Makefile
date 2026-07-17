@@ -66,7 +66,12 @@ assets:
 	  mkdir -p "$$(dirname "$$destpath")"; \
 	  if [ -n "$$member" ]; then \
 	    xd=$$(mktemp -d); \
-	    tar xzf "$$tmp" -C "$$xd" "$$member"; \
+	    case "$$url" in \
+	      *.zip) if command -v unzip >/dev/null 2>&1; then unzip -q "$$tmp" "$$member" -d "$$xd"; \
+	             elif [ -x /c/Windows/System32/tar.exe ]; then /c/Windows/System32/tar.exe xf "$$tmp" -C "$$xd" "$$member"; \
+	             else tar xf "$$tmp" -C "$$xd" "$$member"; fi ;; \
+	      *) tar xzf "$$tmp" -C "$$xd" "$$member" ;; \
+	    esac; \
 	    cp "$$xd/$$member" "$$destpath"; \
 	    rm -rf "$$xd"; \
 	    got2=$$($(SHA256) "$$destpath" | awk '{print $$1}'); \
