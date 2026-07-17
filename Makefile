@@ -15,8 +15,17 @@ PLATFORM  := $(shell go env GOOS)-$(shell go env GOARCH)
 # "<hash>  <file>", so the awk '{print $1}' callers work with either.
 SHA256    := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo shasum -a 256)
 
+# Windows-only: the source-built libtokenizers.a (Rust std, GNU toolchain) pulls
+# in low-level NT/Winsock/crypto syscalls that MinGW does not link by default.
+# Naming them here resolves "undefined reference to Nt*/Rtl*" at link time.
+# Empty on macOS/Linux, so those builds are unaffected.
+LINK_LIBS := -ltokenizers
+ifeq ($(shell go env GOOS),windows)
+LINK_LIBS += -lntdll -lws2_32 -lbcrypt -luserenv -ladvapi32 -lkernel32 -lncrypt
+endif
+
 build: assets
-	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed
+	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) $(LINK_LIBS)" wails build -skipbindings -tags localembed
 
 # Cross-build the Intel-mac app from an arm64 Mac. GOARCH=amd64 makes the
 # assets target fetch the darwin-amd64 artifacts (the embedded/ and lib/ dirs
@@ -27,7 +36,7 @@ build-darwin-amd64:
 	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails build -skipbindings -tags localembed -platform darwin/amd64
 
 dev: assets
-	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) -ltokenizers" wails dev -tags localembed
+	CGO_LDFLAGS="-L$(PWD)/$(LIB_DIR) $(LINK_LIBS)" wails dev -tags localembed
 
 test:
 	go test ./...

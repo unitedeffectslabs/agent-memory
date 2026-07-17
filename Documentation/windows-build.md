@@ -77,9 +77,12 @@ cannot read zips). Checksums use `sha256sum` if present, else `shasum -a 256`
 
 ## Troubleshooting (observed / anticipated)
 
-- **Missing Windows system symbols at link** (`ws2_32`, `bcrypt`, `userenv`,
-  `ntdll`): append `-lws2_32 -lbcrypt -luserenv -lntdll` to `CGO_LDFLAGS`. If the
-  build needs them, they go in the Makefile behind a Windows guard.
+- **Missing Windows system symbols at link** (`undefined reference to Nt*` /
+  `Rtl*`, `ws2_32`, `bcrypt`, `userenv`): the Rust static lib pulls in NT/Winsock/
+  crypto syscalls MinGW doesn't link by default. **Handled** — the Makefile's
+  `LINK_LIBS` appends `-lntdll -lws2_32 -lbcrypt -luserenv -ladvapi32 -lkernel32
+  -lncrypt` when `GOOS=windows` (empty elsewhere). Observed and fixed during the
+  first Windows build; listed here in case a tokenizers/Rust bump adds more.
 - **`onnxruntime_providers_shared.dll` load error**: the official zip ships this
   second DLL; CPU-only use normally doesn't need it, but if ORT fails to load,
   pin it as an extra `embedded/` artifact beside the main DLL.
