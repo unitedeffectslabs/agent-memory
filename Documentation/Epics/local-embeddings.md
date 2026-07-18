@@ -537,9 +537,22 @@ and the indexing-progress UX all already exist and are the extension points.
 3. `go vet ./...`, `go test ./...`, `make build`, full manual test both modes.
 4. **Verification gaps carried from Phase 5** (recorded 2026-07-17 — coverage gaps, not known
    defects; each Phase 5 platform's core inference + search path IS verified):
-   - [ ] **Windows GUI smoke** (~5 min, human at the PC screen — headless SSH couldn't do it):
-     launch `agent-memory.exe`, keyless onboarding, index a folder, search from the UI.
-     All Windows verification so far was headless (MCP stdio path only).
+   - [x] **Windows GUI smoke** — DONE 2026-07-17/18, and it earned its keep: the field test
+     (keyless onboarding ✓, real 109-file vault indexed, dossier search via Claude Desktop
+     returning correct contextual results ✓) surfaced **three real bugs**, all fixed:
+     1. **Token-budget overflow** — every multi-chunk file (>~1.7 KB) silently failed to
+        embed on EVERY platform, latent since Phase 3 (all prior verifications used tiny
+        single-chunk corpora). Fixed + permanent large-doc integration test: **PR #10**;
+        report `Documentation/Bugs/local-embed-token-budget-overflow.md`. Field-verified:
+        105 files / 932 chunks / 79 multi-chunk / 0 errors (was 26/26/0).
+     2. **Index failures invisible** (stderr only, nothing in the Log page): **PR #8**.
+     3. **Close-window zombies on Windows** (HideWindowOnClose without the mac-only tray;
+        six concurrent instances accumulated): **PR #9**.
+     Observations for Bo (not fixed): onboarding registers the folder but indexing starts
+     only via the Dashboard button (intentional per app.go comment — confirm UX intent);
+     Microsoft-Store-installed Claude Desktop reads its config from the MSIX sandbox
+     (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`), so the Install button
+     can't reach it — documented limitation, needs a decision on Store-install detection.
    - [x] **Full untagged `go test ./...` on Windows** — DONE 2026-07-17: every package green
      except `TestOnCreate`, which fails exactly as on Linux (assumption CONFIRMED — Windows
      delivers the same create+write double-event). PR #5's fix branch verified on Windows:
