@@ -41,6 +41,16 @@ const (
 	defaultBatchSize = 16
 )
 
+// EmbedTokenReserve is the token headroom the embedder consumes around each
+// input at embed time: the E5 instruction prefix ("passage: " / "query: ")
+// plus the tokenizer's special tokens, rounded up generously. Chunkers must
+// budget chunks at MaxInputTokens() − EmbedTokenReserve so the prefixed,
+// tokenized sequence never exceeds the model's hard limit — the epic's
+// "effective chunk size ≈ 480" (512 − 32). Passing MaxInputTokens() straight
+// through as the chunk budget overflows the model by the prefix width (the
+// "512 by 516" ORT crash that silently dropped every multi-chunk file).
+const EmbedTokenReserve = 32
+
 // onnxSession is the seam over the ONNX Runtime session. Implementations take
 // padded, batched int64 input tensors (input_ids, attention_mask,
 // token_type_ids) and return one mean-pooled vector per input row. Injecting a
@@ -148,7 +158,10 @@ func (e *LocalEmbedder) embedBatch(texts []string) ([][]float32, error) {
 		if err != nil {
 			return nil, fmt.Errorf("local: tokenize: %w", err)
 		}
-		tokenIDs[i] = ids
+		// Defense-in-depth: never hand the model more than its context window.
+		// The chunker budgets indexed chunks below the limit, but queries reach
+		// here unchunked and any budgeting bug would otherwise crash inference.
+		tokenIDs[i] = truncateTokens(ids, modelMaxTokens)
 	}
 
 	ids, mask, types := buildInputs(tokenIDs)
@@ -207,6 +220,20 @@ func withPrefix(prefix string, texts []string) []string {
 	for i, t := range texts {
 		out[i] = prefix + t
 	}
+	return out
+}
+
+// truncateTokens caps a token sequence at max tokens. The tokenizer emits the
+// model's end-of-sequence special token last; truncation preserves it so an
+// over-long sequence stays well-formed (<s> … </s>) instead of ending
+// mid-stream.
+func truncateTokens(ids []uint32, max int) []uint32 {
+	if max <= 0 || len(ids) <= max {
+		return ids
+	}
+	out := make([]uint32, max)
+	copy(out, ids[:max-1])
+	out[max-1] = ids[len(ids)-1]
 	return out
 }
 

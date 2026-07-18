@@ -4,7 +4,10 @@ package local
 
 import (
 	"math"
+	"strings"
 	"testing"
+
+	"github.com/borzou/vecstore/internal/chunker"
 )
 
 // TestIntegrationEmbed exercises the real ONNX Runtime + HF tokenizer pipeline
@@ -90,4 +93,64 @@ func TestOrtLibFileIsKnownCandidate(t *testing.T) {
 		}
 	}
 	t.Fatalf("ortLibFile %q is not in dylibCandidates %v", ortLibFile, dylibCandidates)
+}
+
+// TestIntegrationLargeDocument covers the scenario every platform smoke missed:
+// a document big enough to need multiple chunks, through the REAL wired
+// pipeline (HF tokenizer + reserved chunk budget + ONNX inference), plus an
+// over-long query through the unchunked query path. Regression for the
+// "512 by 516" failure that silently dropped every >1-chunk file.
+func TestIntegrationLargeDocument(t *testing.T) {
+	if _, _, _, err := resolveAssets(Config{}); err != nil {
+		t.Skipf("no local assets available: %v", err)
+	}
+	e := New(Config{Threads: 2, BatchSize: 8})
+	tok, err := NewChunkerTokenizer(Config{})
+	if err != nil {
+		t.Fatalf("chunker tokenizer: %v", err)
+	}
+	c, err := chunker.New(
+		chunker.WithTokenizer(tok),
+		chunker.WithMaxInputTokens(e.MaxInputTokens()-EmbedTokenReserve),
+	)
+	if err != nil {
+		t.Fatalf("chunker: %v", err)
+	}
+
+	doc := strings.Repeat("Session notes: the demo plan needs a gap execution review and an architecture pivot before the milestone. ", 300) // well beyond one chunk
+	chunks, err := c.ChunkText(doc)
+	if err != nil {
+		t.Fatalf("chunk: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("test needs a multi-chunk doc, got %d chunks", len(chunks))
+	}
+	texts := make([]string, len(chunks))
+	for i, ch := range chunks {
+		texts[i] = ch.Content
+	}
+	vecs, err := e.EmbedDocuments(texts)
+	if err != nil {
+		t.Fatalf("EmbedDocuments over %d real chunks: %v", len(chunks), err)
+	}
+	if len(vecs) != len(chunks) {
+		t.Fatalf("got %d vectors for %d chunks", len(vecs), len(chunks))
+	}
+	for i, v := range vecs {
+		if len(v) != 384 {
+			t.Fatalf("chunk %d dim = %d, want 384", i, len(v))
+		}
+	}
+
+	// The unchunked query path: a query far beyond the context window must
+	// embed (truncated) rather than crash inference.
+	longQuery := strings.Repeat("what was the demo plan and architecture pivot for the dossier project ", 60)
+	qv, err := e.EmbedQuery(longQuery)
+	if err != nil {
+		t.Fatalf("EmbedQuery over-long query: %v", err)
+	}
+	if len(qv) != 384 {
+		t.Fatalf("query dim = %d, want 384", len(qv))
+	}
+	t.Logf("large-doc pipeline OK: %d chunks embedded, over-long query embedded", len(chunks))
 }

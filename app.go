@@ -74,9 +74,14 @@ func buildChunker(cfg *store.SQLiteStore, provider string, embedder embeddings.E
 		if err != nil {
 			return nil, fmt.Errorf("local chunker tokenizer: %w", err)
 		}
+		// Budget below the model's hard limit: the embedder prepends the E5
+		// prefix and the tokenizer adds special tokens AFTER chunking, so a
+		// chunk cut exactly at MaxInputTokens overflows the model (512+prefix
+		// → the "512 by 516" ORT failure that silently dropped every
+		// multi-chunk file). Epic: effective chunk size ≈ 480.
 		opts = append(opts,
 			chunker.WithTokenizer(tok),
-			chunker.WithMaxInputTokens(embedder.MaxInputTokens()),
+			chunker.WithMaxInputTokens(embedder.MaxInputTokens()-local.EmbedTokenReserve),
 		)
 	}
 	return chunker.New(opts...)

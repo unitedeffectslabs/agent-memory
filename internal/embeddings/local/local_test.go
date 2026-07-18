@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -345,4 +346,64 @@ func vecNorm(v []float32) float64 {
 		s += float64(x) * float64(x)
 	}
 	return math.Sqrt(s)
+}
+
+// --- token-budget regression tests (the "512 by 516" bug) -------------------
+
+func TestTruncateTokens(t *testing.T) {
+	mk := func(n int) []uint32 {
+		ids := make([]uint32, n)
+		for i := range ids {
+			ids[i] = uint32(i + 100)
+		}
+		return ids
+	}
+	t.Run("under limit unchanged", func(t *testing.T) {
+		ids := mk(10)
+		got := truncateTokens(ids, 512)
+		if len(got) != 10 {
+			t.Fatalf("len = %d, want 10", len(got))
+		}
+	})
+	t.Run("at limit unchanged", func(t *testing.T) {
+		if got := truncateTokens(mk(512), 512); len(got) != 512 {
+			t.Fatalf("len = %d, want 512", len(got))
+		}
+	})
+	t.Run("over limit capped preserving EOS", func(t *testing.T) {
+		ids := mk(516)
+		got := truncateTokens(ids, 512)
+		if len(got) != 512 {
+			t.Fatalf("len = %d, want 512", len(got))
+		}
+		if got[511] != ids[515] {
+			t.Fatalf("last token = %d, want the original final (EOS) token %d", got[511], ids[515])
+		}
+		if got[510] != ids[510] {
+			t.Fatalf("truncation should keep the first max-1 tokens intact")
+		}
+	})
+	t.Run("zero max disables", func(t *testing.T) {
+		if got := truncateTokens(mk(600), 0); len(got) != 600 {
+			t.Fatalf("max=0 should disable truncation")
+		}
+	})
+}
+
+// TestEmbedBatchTruncatesOversizedInput proves the model never receives more
+// than modelMaxTokens even when a caller hands the embedder unchunked text
+// (the query path has no chunker; regression for the silent multi-chunk-file
+// indexing failure).
+func TestEmbedBatchTruncatesOversizedInput(t *testing.T) {
+	e, sess, _ := newFakeEmbedder([]float32{1, 0})
+	long := strings.Repeat("x", modelMaxTokens+300) // fakeTokenizer: 1 token per byte
+
+	if _, err := e.EmbedQuery(long); err != nil {
+		t.Fatalf("EmbedQuery long input: %v", err)
+	}
+	for _, row := range sess.lastIDs {
+		if len(row) > modelMaxTokens {
+			t.Fatalf("session received %d tokens, model limit is %d", len(row), modelMaxTokens)
+		}
+	}
 }
