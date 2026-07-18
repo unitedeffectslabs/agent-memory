@@ -617,3 +617,61 @@ func TestReset(t *testing.T) {
 		t.Errorf("store.Reset dimension = %d, want 1536", resetDim)
 	}
 }
+
+// TestIndexErrorsAreLoggedToActivityLog is a regression test for silent
+// indexing failures: when IndexFile errors during AddDirectory or a watcher
+// event, the failure must land in the activity log (the Log page), not just
+// the invisible process stderr. Found when an embedding bug silently dropped
+// 79 of 105 real-vault files with zero user-visible signal.
+func TestIndexErrorsAreLoggedToActivityLog(t *testing.T) {
+	dir := t.TempDir()
+	tempFileInDir(t, dir, "doc.txt", "some content that will fail to embed")
+
+	var logged []domain.ActivityLogEntry
+	ms := &mocks.MockStore{
+		AddDirectoryFn: func(path string) error { return nil },
+		GetConfigFn:    func(key string) (string, error) { return "", nil },
+		GetFileByPathFn: func(path string) (*domain.File, error) { return nil, nil },
+		InsertLogEntryFn: func(entry domain.ActivityLogEntry) error {
+			logged = append(logged, entry)
+			return nil
+		},
+	}
+	mc := &mocks.MockChunker{
+		ChunkTextFn: func(content string) ([]chunker.ChunkResult, error) {
+			return []chunker.ChunkResult{{Content: content, TokenCount: 5}}, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		EmbedFn: func(texts []string) ([][]float32, error) {
+			return nil, fmt.Errorf("embedder exploded")
+		},
+	}
+	eng := New(ms, me, mc, &mocks.MockWatcher{}, defaultMockExtractor())
+
+	// AddDirectory path.
+	if err := eng.AddDirectory(dir); err != nil {
+		t.Fatalf("AddDirectory: %v", err)
+	}
+	foundError := false
+	for _, e := range logged {
+		if e.Action == "error" && strings.Contains(e.Detail, "embedder exploded") {
+			foundError = true
+		}
+	}
+	if !foundError {
+		t.Fatalf("AddDirectory index failure not logged to activity log; got %+v", logged)
+	}
+
+	// Watcher-event paths.
+	logged = nil
+	eng.OnCreate(filepath.Join(dir, "doc.txt"))
+	if len(logged) == 0 || logged[len(logged)-1].Action != "error" {
+		t.Fatalf("OnCreate index failure not logged; got %+v", logged)
+	}
+	logged = nil
+	eng.OnModify(filepath.Join(dir, "doc.txt"))
+	if len(logged) == 0 || logged[len(logged)-1].Action != "error" {
+		t.Fatalf("OnModify index failure not logged; got %+v", logged)
+	}
+}

@@ -463,6 +463,7 @@ func (eng *Engine) AddDirectory(path string) error {
 		}
 		if indexErr := eng.IndexFile(p); indexErr != nil {
 			log.Printf("engine: index %s: %v", p, indexErr)
+			eng.logActivity(p, "error", fmt.Sprintf("index: %v", indexErr))
 		}
 		eng.mu.Lock()
 		eng.indexedFiles++
@@ -608,6 +609,7 @@ func (eng *Engine) initialScan() {
 		if indexErr := eng.IndexFile(p); indexErr != nil {
 			errored++
 			log.Printf("engine: initial scan index %s: %v", p, indexErr)
+			eng.logActivity(p, "error", fmt.Sprintf("index: %v", indexErr))
 		}
 		eng.mu.Lock()
 		eng.indexedFiles++
@@ -705,6 +707,7 @@ func (eng *Engine) OnCreate(path string) {
 	}
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnCreate %s: %v", path, err)
+		eng.logActivity(path, "error", fmt.Sprintf("index: %v", err))
 	}
 }
 
@@ -721,6 +724,7 @@ func (eng *Engine) OnModify(path string) {
 	}
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnModify %s: %v", path, err)
+		eng.logActivity(path, "error", fmt.Sprintf("index: %v", err))
 	}
 }
 
