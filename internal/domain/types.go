@@ -30,7 +30,7 @@ type SearchParams struct {
 	Query     string
 	Limit     int     // Max results. Default: 10.
 	Offset    int     // Skip first N results (pagination). Default: 0.
-	Threshold float32 // Max distance; results farther than this are excluded. Default: 1.5 (cosine). 0 means no threshold.
+	Threshold float32 // Max distance; results farther than this are excluded. 0 means "use the provider-aware default" (openai 1.5, local 0.6 — see embeddings.DefaultThreshold).
 }
 
 type SearchResult struct {

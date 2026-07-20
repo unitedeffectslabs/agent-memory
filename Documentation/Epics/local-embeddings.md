@@ -1,10 +1,13 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** In Progress — Phase 5 nearly complete: all four targets built & verified (macOS
-arm64 shipped in PR #2; Linux, macOS x86_64, Windows x64 in stacked PRs #3/#4/#6/#7). Only the
-linux-amd64 *runtime* smoke (artifacts pinned, needs an x64 Linux box) and Phase 6 (cleanup)
-remain. PRs all draft, awaiting Bo's review.
+**Status:** Complete pending review — all phases (0–6) executed and verified. Every shipping
+target (macOS arm64/x86_64, Linux arm64/x64, Windows x64) built, tested, and — for Windows and
+Linux — GUI field-tested on real hardware with real data. The Windows field test surfaced and
+fixed a critical latent cross-platform bug (multi-chunk embed overflow, PR #10 + bug report).
+Delivered as a stacked PR chain #2→#3→#4→#6→#7→#10 plus independent fixes #5/#8/#9, all draft,
+awaiting Bo's review. Flips to Complete when the stack merges (one post-merge chore: re-run
+the Windows suite after #5 lands).
 **Owner:** Bo Motlagh
 
 ## Goal
@@ -574,6 +577,36 @@ and the indexing-progress UX all already exist and are the extension points.
      stock webkit2gtk-4.0/gtk-3), extracted assets to `linux-amd64-<fingerprint>/`, and
      answered the MCP search correctly against a macOS-indexed DB.
 5. Update this epic's Status to Complete; record the chosen default model and measured numbers.
+
+**Phase 6 executed 2026-07-20 — results:**
+
+- **Orphan hunt: clean.** Zero callers of the old `Embed()` name anywhere. Every
+  `"text-embedding-3-small"` / `1536` occurrence lives in a legitimate OpenAI-path site
+  (defaults.go, openai.go, OpenAI UI pickers, tests asserting OpenAI resolution). One
+  deliberate fallback kept: `store.defaultVecDimension = 1536` (dim ≤ 0 fallback, documented
+  as historical-schema preservation; the single production caller always passes the resolved
+  dimension). Fixed one stale comment (domain.SearchOptions.Threshold now points at the
+  provider-aware `embeddings.DefaultThreshold`: openai 1.5 / local 0.6).
+- **Architecture audit: passes.** Inward-only imports verified package-by-package
+  (store→domain only — never imports embeddings; embeddings/chunker/watcher/extractor
+  import no siblings; engine depends on interfaces of all domains; mcp defines its own
+  service interfaces and imports only domain). All wiring in main.go. All six domain
+  interfaces have mocks (`chunker.Tokenizer`, a two-method seam, uses package-local fakes
+  in its consumers — acceptable). Delivery layer thin (app.go pass-through + the sanctioned
+  provider-swap flow).
+- **Formal pass: green.** `go vet` clean; untagged suite 8/8 packages; tagged integration
+  suite (incl. the large-document regression) passes; `make build` (arm64, fix included);
+  stdio mode answers a semantic search correctly with the fixed binary; GUI mode
+  Phase-4-verified and field-verified on Windows + Linux with the fix.
+- **Post-review items only:** re-run the Windows suite once PR #5 merges (expect all-green);
+  flip Status from "Complete pending review" to "Complete" when the PR stack lands.
+
+**Final measured numbers (recorded per this checklist):** default model
+`multilingual-e5-small` int8 (384-dim, 512-token ctx, effective chunk budget 480);
+cosine-distance ordering related ≈0.13–0.14 < cross-lingual ≈0.17 < unrelated ≈0.28–0.29,
+reproduced identically on macOS arm64, macOS x86_64 (Rosetta), Linux arm64/x64, Windows x64;
+throughput ~30 chunks/s (M-series) to ~4 chunks/s (2016 dual-core i7); field scale:
+105 files / 932 chunks real vault on Windows, offline, zero errors.
 
 ## Phase 3 — Detailed Plan (DRAFT, pending Bo review)
 
