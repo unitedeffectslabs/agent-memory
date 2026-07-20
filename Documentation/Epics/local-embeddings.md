@@ -553,6 +553,14 @@ and the indexing-progress UX all already exist and are the extension points.
      Microsoft-Store-installed Claude Desktop reads its config from the MSIX sandbox
      (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`), so the Install button
      can't reach it — documented limitation, needs a decision on Store-install detection.
+   - [x] **Linux GUI field test** — DONE 2026-07-20 (Surface, Pop!_OS 24.04, fix #10 build):
+     first-ever Linux GUI run — keyless onboarding ✓, indexed 4 large docs (76 chunks, all
+     multi-chunk, 0 errors) ✓, MCP semantic search correct ✓. Throughput ~4 chunks/s on the
+     older dual-core i7 (vs ~30/s on the M-series dev Mac) — expected CPU scaling, no
+     pathology. **Packaging lesson:** mid-test the machine upgraded 22.04→24.04, which
+     REMOVES webkit2gtk-4.0 — the 4.0-linked binary stopped loading. Linux release builds
+     must target **webkit2gtk-4.1** (`-tags webkit2_41`; present on 22.04 AND 24.04; the
+     linux-arm64 build already does — only the ad-hoc x64 test build used 4.0).
    - [x] **Full untagged `go test ./...` on Windows** — DONE 2026-07-17: every package green
      except `TestOnCreate`, which fails exactly as on Linux (assumption CONFIRMED — Windows
      delivers the same create+write double-event). PR #5's fix branch verified on Windows:
