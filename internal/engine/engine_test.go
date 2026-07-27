@@ -643,7 +643,7 @@ func TestIndexErrorsAreLoggedToActivityLog(t *testing.T) {
 		},
 	}
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return nil, fmt.Errorf("embedder exploded")
 		},
 	}
