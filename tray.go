@@ -82,6 +82,11 @@ import (
 //go:embed assets/trayicon.png
 var trayIcon []byte
 
+// hasTray reports whether this platform has a status-bar tray to hide into.
+// Owned by the tray build-tag pair so main.go's hide-on-close behavior can
+// never drift from the tray implementation.
+const hasTray = true
+
 // setupTray creates a macOS status bar item with Show / Quit menu.
 // Returns a cleanup function.
 func (a *App) setupTray() func() {

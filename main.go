@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/borzou/vecstore/internal/embeddings"
 	"github.com/borzou/vecstore/internal/embeddings/local"
@@ -192,13 +191,13 @@ func main() {
 		Title:             "Agent Memory",
 		Width:             900,
 		Height:            700,
-		// Hide-on-close pairs with the status-bar tray (Show/Quit menu), which
-		// is macOS-only Objective-C (tray.go). On platforms without the tray,
-		// hiding would leave an invisible process with no way to surface or
-		// quit it — relaunches then stack zombie instances that contend for
-		// the single-writer SQLite DB (observed on Windows: six concurrent
-		// instances). Close = quit everywhere except macOS.
-		HideWindowOnClose: runtime.GOOS == "darwin",
+		// Hide-on-close is only safe where a tray exists to surface/quit the
+		// hidden app; without one, hiding leaves an invisible process and
+		// relaunches stack zombie instances contending for the single-writer
+		// SQLite DB (observed on Windows: six concurrent instances). hasTray
+		// is owned by the tray build-tag pair (tray.go / tray_stub.go), so
+		// this can never drift from the actual tray implementation.
+		HideWindowOnClose: hasTray,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
