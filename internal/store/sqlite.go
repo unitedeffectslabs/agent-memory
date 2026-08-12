@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"time"
 
@@ -48,7 +49,35 @@ func NewSQLiteStore(dbPath string, dim int) (*SQLiteStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := s.pruneActivityLog(); err != nil {
+		// Retention is hygiene, not correctness — log-worthy upstream but must
+		// never block opening the store.
+		log.Printf("store: prune activity log: %v", err)
+	}
 	return s, nil
+}
+
+// Activity-log retention: entries older than the TTL are dropped, and the
+// table is capped to the newest logRetentionMaxRows. Without this the table
+// grows without bound (the Log page pays COUNT(*) over it every poll, on the
+// single connection, in contention with indexing writes).
+const (
+	logRetentionDays    = 30
+	logRetentionMaxRows = 5000
+)
+
+// pruneActivityLog applies the TTL and row cap. Called at store open.
+func (s *SQLiteStore) pruneActivityLog() error {
+	cutoff := time.Now().UTC().AddDate(0, 0, -logRetentionDays)
+	if _, err := s.db.Exec(`DELETE FROM activity_log WHERE timestamp < ?`, cutoff); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(
+		`DELETE FROM activity_log WHERE id NOT IN
+		   (SELECT id FROM activity_log ORDER BY timestamp DESC LIMIT ?)`,
+		logRetentionMaxRows,
+	)
+	return err
 }
 
 func (s *SQLiteStore) migrate(dim int) error {
@@ -387,7 +416,9 @@ func (s *SQLiteStore) Search(embedding []float32, limit, offset int, threshold f
 	}
 	defer rows.Close()
 
-	var all []domain.SearchResult
+	// Non-nil so an empty result set serializes as [] (not null) all the way
+	// out through the MCP transports — strict JSON clients index into it.
+	all := make([]domain.SearchResult, 0, fetchLimit)
 	for rows.Next() {
 		var r domain.SearchResult
 		if err := rows.Scan(&r.ChunkIndex, &r.Content, &r.FilePath, &r.Score); err != nil {
@@ -406,7 +437,7 @@ func (s *SQLiteStore) Search(embedding []float32, limit, offset int, threshold f
 	if offset > 0 && offset < len(all) {
 		all = all[offset:]
 	} else if offset >= len(all) {
-		return nil, nil
+		return []domain.SearchResult{}, nil
 	}
 
 	// Apply limit.
@@ -454,6 +485,23 @@ func (s *SQLiteStore) InsertLogEntry(entry domain.ActivityLogEntry) error {
 		entry.Timestamp.UTC(), entry.Path, entry.Action, entry.Detail,
 	)
 	return err
+}
+
+// UpsertLogEntry updates the existing (path, action) row's timestamp and
+// detail in place, inserting only if none exists — one living row per
+// failing path instead of an identical append per launch.
+func (s *SQLiteStore) UpsertLogEntry(entry domain.ActivityLogEntry) error {
+	res, err := s.db.Exec(
+		`UPDATE activity_log SET timestamp = ?, detail = ? WHERE path = ? AND action = ?`,
+		entry.Timestamp.UTC(), entry.Detail, entry.Path, entry.Action,
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		return nil
+	}
+	return s.InsertLogEntry(entry)
 }
 
 func (s *SQLiteStore) ListLogEntries(limit, offset int) ([]domain.ActivityLogEntry, int, error) {

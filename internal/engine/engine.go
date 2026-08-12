@@ -205,8 +205,34 @@ func (eng *Engine) ListLogEntries(limit, offset int) ([]domain.ActivityLogEntry,
 }
 
 // IndexFile extracts text from a file, hashes it, and runs the chunk-embed-store
-// pipeline if the content has changed since the last index.
+// pipeline if the content has changed since the last index. Failures are
+// recorded in the activity log exactly once, here — callers must not add their
+// own logActivity for the returned error (stderr context lines are fine).
+// Error rows are upserted per path (timestamp/detail updated in place), so a
+// persistently-failing file keeps one living row instead of appending an
+// identical row every launch.
 func (eng *Engine) IndexFile(path string) error {
+	err := eng.indexFile(path)
+	if err != nil {
+		eng.logIndexError(path, err)
+	}
+	return err
+}
+
+// logIndexError records an index failure via the per-path upsert.
+func (eng *Engine) logIndexError(path string, err error) {
+	entry := domain.ActivityLogEntry{
+		Timestamp: time.Now(),
+		Path:      path,
+		Action:    "error",
+		Detail:    fmt.Sprintf("index: %v", err),
+	}
+	if lerr := eng.store.UpsertLogEntry(entry); lerr != nil {
+		log.Printf("engine: log index error: %v", lerr)
+	}
+}
+
+func (eng *Engine) indexFile(path string) error {
 	// 1. Check if the file type is supported at all.
 	if !eng.extractor.IsSupported(path) {
 		eng.logActivity(path, "ignored", "unsupported file type")
@@ -232,7 +258,6 @@ func (eng *Engine) IndexFile(path string) error {
 	// 4. Extract text content (handles text, docx, xlsx, pptx, metadata, etc.)
 	result, err := eng.extractor.Extract(path)
 	if err != nil {
-		eng.logActivity(path, "error", fmt.Sprintf("extract: %v", err))
 		return fmt.Errorf("extract %s: %w", path, err)
 	}
 	if result.Text == "" {
@@ -464,7 +489,6 @@ func (eng *Engine) AddDirectory(path string) error {
 		}
 		if indexErr := eng.IndexFile(p); indexErr != nil {
 			log.Printf("engine: index %s: %v", p, indexErr)
-			eng.logActivity(p, "error", fmt.Sprintf("index: %v", indexErr))
 		}
 		eng.mu.Lock()
 		eng.indexedFiles++
@@ -613,7 +637,6 @@ func (eng *Engine) initialScan() {
 		if indexErr := eng.IndexFile(p); indexErr != nil {
 			errored++
 			log.Printf("engine: initial scan index %s: %v", p, indexErr)
-			eng.logActivity(p, "error", fmt.Sprintf("index: %v", indexErr))
 		}
 		eng.mu.Lock()
 		eng.indexedFiles++
@@ -624,8 +647,22 @@ func (eng *Engine) initialScan() {
 	}
 	log.Printf("engine: initial scan complete — %d files processed, %d errors", len(filePaths), errored)
 
-	// Record the dimension the index was built with so read-only consumers can
-	// detect an embedding-model mismatch before querying sqlite-vec.
+	eng.recordIndexIdentity()
+}
+
+// recordIndexIdentity persists what the index was built with so read-only
+// consumers can detect a mismatch before querying sqlite-vec. The full
+// fingerprint (provider:model:dimensions, per the epic) catches same-dimension
+// model swaps that a bare dimension cannot — e.g. the named upgrade candidate
+// (granite-97m) is also 384-dim. The bare dimension is kept alongside for
+// backward compatibility with DBs written before the fingerprint existed.
+func (eng *Engine) recordIndexIdentity() {
+	provider, _ := eng.store.GetConfig("embedding_provider")
+	if provider == "" {
+		provider = embeddings.DefaultProvider()
+	}
+	fp := fmt.Sprintf("%s:%s:%d", provider, eng.embedder.ModelName(), eng.embedder.Dimensions())
+	eng.store.SetConfig("embedding_fingerprint", fp)
 	eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions()))
 }
 
@@ -689,9 +726,7 @@ func (eng *Engine) Reset() error {
 	if err := eng.store.Reset(eng.embedder.Dimensions()); err != nil {
 		return err
 	}
-	// Record the dimension the index was (re)built with so read-only consumers
-	// can detect an embedding-model mismatch before querying sqlite-vec.
-	eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions()))
+	eng.recordIndexIdentity()
 	return eng.Start()
 }
 
@@ -728,7 +763,6 @@ func (eng *Engine) OnCreate(path string) {
 	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnCreate %s: %v", path, err)
-		eng.logActivity(path, "error", fmt.Sprintf("index: %v", err))
 	}
 }
 
@@ -747,7 +781,6 @@ func (eng *Engine) OnModify(path string) {
 	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnModify %s: %v", path, err)
-		eng.logActivity(path, "error", fmt.Sprintf("index: %v", err))
 	}
 }
 

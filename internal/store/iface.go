@@ -23,6 +23,11 @@ type Store interface {
 	Search(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
 	Stats() (domain.IndexStats, error)
 	InsertLogEntry(entry domain.ActivityLogEntry) error
+	// UpsertLogEntry keeps at most one row per (path, action): if one exists
+	// its timestamp and detail are updated in place, otherwise the entry is
+	// inserted. Used for error rows so a persistently-failing file yields one
+	// living row instead of an identical append on every launch.
+	UpsertLogEntry(entry domain.ActivityLogEntry) error
 	ListLogEntries(limit, offset int) ([]domain.ActivityLogEntry, int, error)
 	Reset(embeddingDimension int) error
 	Close() error

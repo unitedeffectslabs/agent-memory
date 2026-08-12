@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -420,6 +421,101 @@ func TestUpsertFileWithChunksAtomic(t *testing.T) {
 	for _, r := range results {
 		if r.FilePath == "/tmp/a/doc.txt" && strings.HasPrefix(r.Content, "v1 ") {
 			t.Fatalf("stale v1 chunk still searchable after replace: %q", r.Content)
+		}
+	}
+}
+
+// TestUpsertLogEntryDedupes pins the one-living-row-per-(path,action)
+// contract: repeat failures update the existing row instead of appending.
+func TestUpsertLogEntryDedupes(t *testing.T) {
+	s := newTestStore(t)
+	e := domain.ActivityLogEntry{Timestamp: time.Now(), Path: "/a/b.pdf", Action: "error", Detail: "index: boom v1"}
+	if err := s.UpsertLogEntry(e); err != nil {
+		t.Fatal(err)
+	}
+	e.Detail = "index: boom v2"
+	e.Timestamp = time.Now().Add(time.Minute)
+	if err := s.UpsertLogEntry(e); err != nil {
+		t.Fatal(err)
+	}
+	entries, total, err := s.ListLogEntries(10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("total = %d entries = %d, want exactly 1 row", total, len(entries))
+	}
+	if entries[0].Detail != "index: boom v2" {
+		t.Fatalf("detail = %q, want the updated v2 detail", entries[0].Detail)
+	}
+	// A different path appends normally.
+	e2 := domain.ActivityLogEntry{Timestamp: time.Now(), Path: "/a/c.pdf", Action: "error", Detail: "index: other"}
+	if err := s.UpsertLogEntry(e2); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, _ = s.ListLogEntries(10, 0); total != 2 {
+		t.Fatalf("total = %d, want 2 after a second distinct path", total)
+	}
+}
+
+// TestActivityLogRetention pins the TTL prune at store open.
+func TestActivityLogRetention(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "retention.db")
+	s, err := NewSQLiteStore(dbPath, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := domain.ActivityLogEntry{Timestamp: time.Now().AddDate(0, 0, -60), Path: "/old.txt", Action: "indexed", Detail: "1 chunks"}
+	fresh := domain.ActivityLogEntry{Timestamp: time.Now(), Path: "/fresh.txt", Action: "indexed", Detail: "1 chunks"}
+	if err := s.InsertLogEntry(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertLogEntry(fresh); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Re-open: the 60-day-old row must be pruned, the fresh one kept.
+	s2, err := NewSQLiteStore(dbPath, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	entries, total, err := s2.ListLogEntries(10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || entries[0].Path != "/fresh.txt" {
+		t.Fatalf("after reopen: total = %d first = %+v, want only /fresh.txt", total, entries)
+	}
+}
+
+// TestSearchEmptyResultsMarshalsToArray pins the wire contract: an empty
+// result set must serialize as [] (not null) — strict JSON clients call
+// .length on it. Covers both the no-matches and offset-past-results branches.
+func TestSearchEmptyResultsMarshalsToArray(t *testing.T) {
+	s := newTestStore(t)
+	q := make([]float32, 1536)
+	q[0] = 1
+
+	for name, fn := range map[string]func() ([]domain.SearchResult, error){
+		"no matches":          func() ([]domain.SearchResult, error) { return s.Search(q, 5, 0, 0) },
+		"offset past results": func() ([]domain.SearchResult, error) { return s.Search(q, 5, 100, 0) },
+	} {
+		results, err := fn()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if results == nil {
+			t.Fatalf("%s: results is nil, must be an empty slice", name)
+		}
+		b, err := json.Marshal(results)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "[]" {
+			t.Fatalf("%s: marshals to %s, want []", name, b)
 		}
 	}
 }

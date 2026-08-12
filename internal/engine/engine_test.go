@@ -614,7 +614,11 @@ func TestIndexErrorsAreLoggedToActivityLog(t *testing.T) {
 		AddDirectoryFn:  func(path string) error { return nil },
 		GetConfigFn:     func(key string) (string, error) { return "", nil },
 		GetFileByPathFn: func(path string) (*domain.File, error) { return nil, nil },
-		InsertLogEntryFn: func(entry domain.ActivityLogEntry) error {
+		ListDirectoriesFn: func() ([]domain.Directory, error) {
+			return []domain.Directory{{ID: 1, Path: dir}}, nil
+		},
+		// Error rows flow through the per-path upsert.
+		UpsertLogEntryFn: func(entry domain.ActivityLogEntry) error {
 			logged = append(logged, entry)
 			return nil
 		},
@@ -631,31 +635,42 @@ func TestIndexErrorsAreLoggedToActivityLog(t *testing.T) {
 	}
 	eng := New(ms, me, mc, &mocks.MockWatcher{}, defaultMockExtractor())
 
+	assertErrorLogged := func(caller string) {
+		t.Helper()
+		found := 0
+		for _, e := range logged {
+			if e.Action == "error" && strings.Contains(e.Detail, "embedder exploded") {
+				found++
+			}
+		}
+		if found == 0 {
+			t.Fatalf("%s: index failure not logged to activity log; got %+v", caller, logged)
+		}
+		if found > 1 {
+			t.Fatalf("%s: index failure logged %d times, want exactly once (caller double-log?)", caller, found)
+		}
+	}
+
 	// AddDirectory path.
 	if err := eng.AddDirectory(dir); err != nil {
 		t.Fatalf("AddDirectory: %v", err)
 	}
-	foundError := false
-	for _, e := range logged {
-		if e.Action == "error" && strings.Contains(e.Detail, "embedder exploded") {
-			foundError = true
-		}
-	}
-	if !foundError {
-		t.Fatalf("AddDirectory index failure not logged to activity log; got %+v", logged)
-	}
+	assertErrorLogged("AddDirectory")
+
+	// initialScan path — the startup rescan where the motivating field
+	// incident (79 files silently dropped) actually happened. Synchronous
+	// when called directly.
+	logged = nil
+	eng.initialScan()
+	assertErrorLogged("initialScan")
 
 	// Watcher-event paths.
 	logged = nil
 	eng.OnCreate(filepath.Join(dir, "doc.txt"))
-	if len(logged) == 0 || logged[len(logged)-1].Action != "error" {
-		t.Fatalf("OnCreate index failure not logged; got %+v", logged)
-	}
+	assertErrorLogged("OnCreate")
 	logged = nil
 	eng.OnModify(filepath.Join(dir, "doc.txt"))
-	if len(logged) == 0 || logged[len(logged)-1].Action != "error" {
-		t.Fatalf("OnModify index failure not logged; got %+v", logged)
-	}
+	assertErrorLogged("OnModify")
 }
 
 // TestStopWaitsForInflightIndexing pins the shutdown contract: Stop() must not
