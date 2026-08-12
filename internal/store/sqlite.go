@@ -234,6 +234,92 @@ func (s *SQLiteStore) InsertChunks(fileID int64, chunks []domain.Chunk) error {
 	return tx.Commit()
 }
 
+// UpsertFileWithChunks atomically replaces a file's index entry in a single
+// transaction: delete the file's old chunks + vectors, upsert the file row,
+// insert the new chunks + vectors. Atomicity is the crash-safety guarantee for
+// indexing: without it, a process death after the file row is written but
+// before its chunks land records the file as indexed-at-hash with no content,
+// and the hash short-circuit then skips it forever.
+func (s *SQLiteStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Remove existing chunks + vectors (no-op for a brand-new file).
+	if f.ID != 0 {
+		rows, err := tx.Query(`SELECT id FROM chunks WHERE file_id = ?`, f.ID)
+		if err != nil {
+			return err
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, err := tx.Exec(`DELETE FROM chunk_embeddings WHERE chunk_id = ?`, id); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM chunks WHERE file_id = ?`, f.ID); err != nil {
+			return err
+		}
+	}
+
+	// Upsert the file row and resolve its (possibly new) ID within the tx.
+	res, err := tx.Exec(
+		`INSERT OR REPLACE INTO files(directory_id, path, hash, indexed_at) VALUES(?, ?, ?, ?)`,
+		f.DirectoryID, f.Path, f.Hash, f.IndexedAt.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert file: %w", err)
+	}
+	fileID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	stmtChunk, err := tx.Prepare(`INSERT INTO chunks(file_id, chunk_index, content, token_count) VALUES(?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmtChunk.Close()
+	stmtVec, err := tx.Prepare(`INSERT INTO chunk_embeddings(chunk_id, embedding) VALUES(?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmtVec.Close()
+
+	for _, c := range chunks {
+		res, err := stmtChunk.Exec(fileID, c.Index, c.Content, c.TokenCount)
+		if err != nil {
+			return fmt.Errorf("insert chunk: %w", err)
+		}
+		chunkID, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if len(c.Embedding) > 0 {
+			blob := float32SliceToBlob(c.Embedding)
+			if _, err := stmtVec.Exec(chunkID, blob); err != nil {
+				return fmt.Errorf("insert embedding: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) RemoveChunksByFile(fileID int64) error {
 	// Get chunk IDs first to remove from vec table.
 	rows, err := s.db.Query(`SELECT id FROM chunks WHERE file_id = ?`, fileID)

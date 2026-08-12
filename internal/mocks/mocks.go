@@ -23,6 +23,7 @@ type MockStore struct {
 	RemoveFileFn        func(path string) error
 	GetFileByPathFn     func(path string) (*domain.File, error)
 	InsertChunksFn      func(fileID int64, chunks []domain.Chunk) error
+	UpsertFileWithChunksFn func(f domain.File, chunks []domain.Chunk) error
 	RemoveChunksByFileFn func(fileID int64) error
 	SearchFn            func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
 	StatsFn             func() (domain.IndexStats, error)
@@ -70,6 +71,13 @@ func (m *MockStore) ListDirectories() ([]domain.Directory, error) {
 func (m *MockStore) UpsertFile(f domain.File) error {
 	if m.UpsertFileFn != nil {
 		return m.UpsertFileFn(f)
+	}
+	return nil
+}
+
+func (m *MockStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk) error {
+	if m.UpsertFileWithChunksFn != nil {
+		return m.UpsertFileWithChunksFn(f, chunks)
 	}
 	return nil
 }

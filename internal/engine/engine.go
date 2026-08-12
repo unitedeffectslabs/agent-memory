@@ -52,7 +52,8 @@ type Engine struct {
 	extractor extractor.Extractor
 	mu        sync.Mutex
 	indexing  bool
-	stopCh    chan struct{} // closed by Stop() to cancel in-flight indexing
+	stopCh    chan struct{}  // closed by Stop() to cancel in-flight indexing
+	indexWG   sync.WaitGroup // tracks in-flight indexing work; Stop() waits on it so shutdown lands on a file boundary
 	// Progress tracking
 	indexedFiles int
 	totalToIndex int
@@ -270,14 +271,11 @@ func (eng *Engine) IndexFile(path string) error {
 		return fmt.Errorf("find directory for %s: %w", path, err)
 	}
 
-	// 9. Remove old chunks if file existed.
-	if existing != nil {
-		if err := eng.store.RemoveChunksByFile(existing.ID); err != nil {
-			return fmt.Errorf("remove old chunks for %s: %w", path, err)
-		}
-	}
-
-	// 10. Upsert file record.
+	// 9. Atomically replace the file's index entry (remove old chunks, upsert
+	// the file row, insert new chunks) in ONE transaction. A process death
+	// mid-index must leave the file either fully indexed or untouched — three
+	// separate writes could record the file at the new hash with zero chunks,
+	// and the hash short-circuit above would then skip it forever.
 	file := domain.File{
 		DirectoryID: dirID,
 		Path:        path,
@@ -287,22 +285,8 @@ func (eng *Engine) IndexFile(path string) error {
 	if existing != nil {
 		file.ID = existing.ID
 	}
-	if err := eng.store.UpsertFile(file); err != nil {
-		return fmt.Errorf("upsert file %s: %w", path, err)
-	}
-
-	// 11. Insert new chunks. Re-fetch the file ID because INSERT OR REPLACE
-	// may have assigned a new auto-increment ID.
-	stored, err := eng.store.GetFileByPath(path)
-	if err != nil {
-		return fmt.Errorf("get file after upsert %s: %w", path, err)
-	}
-	if stored == nil {
-		return fmt.Errorf("file not found after upsert: %s", path)
-	}
-	file.ID = stored.ID
-	if err := eng.store.InsertChunks(file.ID, domainChunks); err != nil {
-		return fmt.Errorf("insert chunks for %s: %w", path, err)
+	if err := eng.store.UpsertFileWithChunks(file, domainChunks); err != nil {
+		return fmt.Errorf("index write for %s: %w", path, err)
 	}
 
 	eng.logActivity(path, "indexed", fmt.Sprintf("%d chunks", len(domainChunks)))
@@ -457,6 +441,9 @@ func (eng *Engine) AddDirectory(path string) error {
 		log.Printf("engine: walk directory %s: %v", path, walkErr)
 	}
 
+	eng.indexWG.Add(1)
+	defer eng.indexWG.Done()
+
 	eng.mu.Lock()
 	eng.indexing = true
 	eng.totalToIndex = len(filePaths)
@@ -599,6 +586,9 @@ func (eng *Engine) initialScan() {
 		return
 	}
 
+	eng.indexWG.Add(1)
+	defer eng.indexWG.Done()
+
 	eng.mu.Lock()
 	eng.indexing = true
 	eng.totalToIndex = len(filePaths)
@@ -656,7 +646,10 @@ func (eng *Engine) stopped() bool {
 	}
 }
 
-// Stop stops the file watcher and cancels any in-flight indexing.
+// Stop stops the file watcher, cancels any in-flight indexing, and WAITS for
+// the in-flight work to reach a file boundary before returning. Callers that
+// close the store next (shutdown) rely on this: without the wait, an indexing
+// goroutine could still be writing while the store shuts down under it.
 func (eng *Engine) Stop() error {
 	eng.mu.Lock()
 	if eng.stopCh != nil {
@@ -671,7 +664,12 @@ func (eng *Engine) Stop() error {
 
 	eng.store.SetConfig("watcher_running", "false")
 
-	return eng.watcher.Stop()
+	err := eng.watcher.Stop()
+	// After stopCh is closed the scan loops exit at the next file boundary and
+	// the stopped watcher delivers no new events; this wait is bounded by one
+	// file's index time.
+	eng.indexWG.Wait()
+	return err
 }
 
 // Restart stops and then starts the file watcher.
@@ -726,6 +724,8 @@ func (eng *Engine) OnCreate(path string) {
 		eng.logActivity(path, "ignored", "matched ignore pattern")
 		return
 	}
+	eng.indexWG.Add(1)
+	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnCreate %s: %v", path, err)
 		eng.logActivity(path, "error", fmt.Sprintf("index: %v", err))
@@ -743,6 +743,8 @@ func (eng *Engine) OnModify(path string) {
 		eng.logActivity(path, "ignored", "matched ignore pattern")
 		return
 	}
+	eng.indexWG.Add(1)
+	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnModify %s: %v", path, err)
 		eng.logActivity(path, "error", fmt.Sprintf("index: %v", err))

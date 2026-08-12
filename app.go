@@ -123,6 +123,12 @@ func (a *App) shutdown(ctx context.Context) {
 	if err := a.mcpServer.Stop(); err != nil {
 		log.Printf("mcp server stop: %v", err)
 	}
+	// Stop before Close: cancel in-flight indexing and wait for it to reach a
+	// file boundary so the store never shuts down under an active write. With
+	// close=quit on Windows/Linux, quitting mid-scan is a routine event.
+	if err := a.engine.Stop(); err != nil {
+		log.Printf("engine stop: %v", err)
+	}
 	if err := a.engine.Close(); err != nil {
 		log.Printf("engine close: %v", err)
 	}

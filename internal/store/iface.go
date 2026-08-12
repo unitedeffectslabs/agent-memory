@@ -14,6 +14,12 @@ type Store interface {
 	GetFileByPath(path string) (*domain.File, error)
 	InsertChunks(fileID int64, chunks []domain.Chunk) error
 	RemoveChunksByFile(fileID int64) error
+	// UpsertFileWithChunks atomically replaces a file's index entry: old chunks
+	// (and their vectors) are removed, the file row is upserted, and the new
+	// chunks are inserted — all in one transaction, so a crash mid-index leaves
+	// the file either fully indexed or untouched-and-retryable, never recorded
+	// at the new hash with missing chunks.
+	UpsertFileWithChunks(f domain.File, chunks []domain.Chunk) error
 	Search(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
 	Stats() (domain.IndexStats, error)
 	InsertLogEntry(entry domain.ActivityLogEntry) error

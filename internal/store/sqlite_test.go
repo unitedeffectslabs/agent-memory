@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -341,5 +342,84 @@ func TestSearch(t *testing.T) {
 	}
 	if results[0].Content != "hello world" {
 		t.Fatalf("unexpected content: %q", results[0].Content)
+	}
+}
+
+// TestUpsertFileWithChunksAtomic pins the crash-safety contract: the
+// remove-old-chunks / upsert-file / insert-chunks sequence is one transaction,
+// so a failure partway through leaves the previous index entry fully intact —
+// never the file recorded at the new hash with missing chunks (which the hash
+// short-circuit would then skip forever).
+func TestUpsertFileWithChunksAtomic(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddDirectory("/tmp/a"); err != nil {
+		t.Fatal(err)
+	}
+	dirs, _ := s.ListDirectories()
+
+	emb := make([]float32, 1536)
+	emb[0] = 0.5
+
+	// Index v1 successfully.
+	v1 := domain.File{DirectoryID: dirs[0].ID, Path: "/tmp/a/doc.txt", Hash: "hash-v1", IndexedAt: time.Now().UTC()}
+	if err := s.UpsertFileWithChunks(v1, []domain.Chunk{
+		{Index: 0, Content: "v1 chunk zero", TokenCount: 3, Embedding: emb},
+		{Index: 1, Content: "v1 chunk one", TokenCount: 3, Embedding: emb},
+	}); err != nil {
+		t.Fatalf("v1 index: %v", err)
+	}
+	stored, _ := s.GetFileByPath("/tmp/a/doc.txt")
+	if stored == nil || stored.Hash != "hash-v1" {
+		t.Fatalf("v1 not stored correctly: %+v", stored)
+	}
+
+	// Attempt v2 with a chunk whose embedding has the WRONG dimension — the
+	// vec0 insert fails mid-transaction. Everything must roll back.
+	v2 := domain.File{ID: stored.ID, DirectoryID: dirs[0].ID, Path: "/tmp/a/doc.txt", Hash: "hash-v2", IndexedAt: time.Now().UTC()}
+	badEmb := []float32{1, 2, 3} // store was created with dim 1536
+	if err := s.UpsertFileWithChunks(v2, []domain.Chunk{
+		{Index: 0, Content: "v2 chunk zero", TokenCount: 3, Embedding: emb},
+		{Index: 1, Content: "v2 chunk one", TokenCount: 3, Embedding: badEmb},
+	}); err == nil {
+		t.Fatal("expected wrong-dimension embedding to fail the transaction")
+	}
+
+	// The file must still be recorded at hash-v1 with BOTH v1 chunks intact.
+	after, _ := s.GetFileByPath("/tmp/a/doc.txt")
+	if after == nil {
+		t.Fatal("file row vanished after failed update")
+	}
+	if after.Hash != "hash-v1" {
+		t.Fatalf("hash = %q after failed update, want hash-v1 (partial write leaked!)", after.Hash)
+	}
+	results, err := s.Search(emb, 10, 0, 0)
+	if err != nil {
+		t.Fatalf("search after rollback: %v", err)
+	}
+	v1Chunks := 0
+	for _, r := range results {
+		if r.FilePath == "/tmp/a/doc.txt" && strings.HasPrefix(r.Content, "v1 ") {
+			v1Chunks++
+		}
+	}
+	if v1Chunks != 2 {
+		t.Fatalf("searchable v1 chunks after rollback = %d, want 2", v1Chunks)
+	}
+
+	// A good v2 then replaces v1 completely.
+	if err := s.UpsertFileWithChunks(v2, []domain.Chunk{
+		{Index: 0, Content: "v2 only chunk", TokenCount: 3, Embedding: emb},
+	}); err != nil {
+		t.Fatalf("good v2 index: %v", err)
+	}
+	final, _ := s.GetFileByPath("/tmp/a/doc.txt")
+	if final.Hash != "hash-v2" {
+		t.Fatalf("hash = %q, want hash-v2", final.Hash)
+	}
+	results, _ = s.Search(emb, 10, 0, 0)
+	for _, r := range results {
+		if r.FilePath == "/tmp/a/doc.txt" && strings.HasPrefix(r.Content, "v1 ") {
+			t.Fatalf("stale v1 chunk still searchable after replace: %q", r.Content)
+		}
 	}
 }
