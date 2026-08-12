@@ -36,10 +36,17 @@ func (ro *ReadOnlyEngine) Search(params domain.SearchParams) ([]domain.SearchRes
 		params.Threshold = embeddings.DefaultThreshold(provider)
 	}
 
-	// Guard against querying sqlite-vec with a vector whose dimension does not
-	// match the index. This happens when the index was built with a different
-	// embedding model than the one this read-only process is configured with.
-	if dimStr, _ := ro.store.GetConfig("embedding_dimension"); dimStr != "" {
+	// Guard against querying an index built with a different embedding model
+	// than the one this read-only process is configured with. The full
+	// fingerprint (provider:model:dimensions, per the epic) catches
+	// same-dimension model swaps that the bare dimension cannot; the dimension
+	// check remains as fallback for DBs written before the fingerprint existed.
+	ownFP := fmt.Sprintf("%s:%s:%d", provider, ro.embedder.ModelName(), ro.embedder.Dimensions())
+	if indexFP, _ := ro.store.GetConfig("embedding_fingerprint"); indexFP != "" {
+		if indexFP != ownFP {
+			return nil, fmt.Errorf("index was built with embedding %q but this process is configured for %q — mixed vectors would return garbage-ranked results; reopen the GUI app to rebuild the index", indexFP, ownFP)
+		}
+	} else if dimStr, _ := ro.store.GetConfig("embedding_dimension"); dimStr != "" {
 		if indexDim, convErr := strconv.Atoi(dimStr); convErr == nil && indexDim != ro.embedder.Dimensions() {
 			return nil, fmt.Errorf("index was built with a different embedding model (dim %d) than the active provider (dim %d) — reopen the GUI app to rebuild the index", indexDim, ro.embedder.Dimensions())
 		}

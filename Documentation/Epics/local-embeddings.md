@@ -578,6 +578,18 @@ and the indexing-progress UX all already exist and are the extension points.
      answered the MCP search correctly against a macOS-indexed DB.
 5. Update this epic's Status to Complete; record the chosen default model and measured numbers.
 
+**Review revision round (2026-08-12, addressing Bo's PR #2 review):** the shipped
+dimension-only read-only guard was an unrecorded simplification of this epic's specified
+`embedding_fingerprint` — now resolved per the review: the engine records the full
+`provider:model:dimensions` fingerprint on every index run/reset (bare dimension kept for
+pre-fingerprint DBs), and the read-only guard compares fingerprints first, so a
+same-dimension model swap (e.g. granite-97m, also 384-dim) is caught instead of silently
+returning mixed-vector garbage. Also landed in the round: crash-safe shutdown (atomic
+per-file index transaction + Stop-waits-for-file-boundary), activity-log retention
+(30-day TTL / 5000-row cap) with per-path error upsert (no more identical rows per
+launch), error logging consolidated inside IndexFile, deterministic cross-platform
+debounce-merge tests, and `[]` (not `null`) for empty search results.
+
 **Phase 6 executed 2026-07-20 — results:**
 
 - **Orphan hunt: clean.** Zero callers of the old `Embed()` name anywhere. Every
