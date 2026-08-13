@@ -31,18 +31,12 @@ var appInstance *App
 // Injected by main.go so app.go doesn't own provider-to-implementation wiring.
 type EmbedderFactory func(provider, apiKey, model string) (embeddings.Embedder, error)
 
-// resolveProvider applies the provider-resolution policy shared by the
-// composition root and runtime config changes: an explicit configured provider
-// wins; otherwise an existing OpenAI key implies the openai provider (preserving
-// current users); otherwise the default provider.
+// resolveProvider delegates to the single shared policy in the embeddings
+// package (an explicit provider wins; else an OpenAI key implies openai; else
+// the default) — the engine and read-only search resolve through the same
+// function, so the rule cannot drift between processes.
 func resolveProvider(configuredProvider, apiKey string) string {
-	if configuredProvider != "" {
-		return configuredProvider
-	}
-	if apiKey != "" {
-		return embeddings.ProviderOpenAI
-	}
-	return embeddings.DefaultProvider()
+	return embeddings.ResolveProvider(configuredProvider, apiKey)
 }
 
 // resolveModel returns the stored model if set, else the provider's default.

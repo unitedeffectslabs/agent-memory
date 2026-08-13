@@ -268,3 +268,54 @@ func TestDebounceMergesOps(t *testing.T) {
 		}
 	})
 }
+
+// TestDispatchAtomicSaveRename pins the atomic-save pattern: editors like vim
+// (backupcopy=no) RENAME the file away then CREATE it fresh within one
+// debounce window. The merged ops carry Rename, but the path still exists —
+// it must dispatch as a create, not silently vanish from the index. A Rename
+// with the path truly gone still dispatches as delete.
+func TestDispatchAtomicSaveRename(t *testing.T) {
+	t.Run("rename then create, file exists -> OnCreate", func(t *testing.T) {
+		fw, h := func() (*FSWatcher, *mockHandler) {
+			fw, err := NewFSWatcher()
+			if err != nil {
+				t.Fatalf("NewFSWatcher: %v", err)
+			}
+			t.Cleanup(func() { fw.Close() })
+			h := &mockHandler{}
+			fw.handler = h
+			return fw, h
+		}()
+		real := tempFileInDirW(t, t.TempDir(), "saved.md", "new content")
+		fw.dispatch(real, fsnotify.Rename|fsnotify.Create)
+		if got := h.getCreates(); len(got) != 1 {
+			t.Fatalf("OnCreate calls = %v, want exactly one", got)
+		}
+		if got := h.getDeletes(); len(got) != 0 {
+			t.Fatalf("OnDelete fired for a file that still exists: %v", got)
+		}
+	})
+
+	t.Run("rename, file gone -> OnDelete", func(t *testing.T) {
+		fw, err := NewFSWatcher()
+		if err != nil {
+			t.Fatalf("NewFSWatcher: %v", err)
+		}
+		t.Cleanup(func() { fw.Close() })
+		h := &mockHandler{}
+		fw.handler = h
+		fw.dispatch("/definitely/not/a/real/path.md", fsnotify.Rename)
+		if got := h.getDeletes(); len(got) != 1 {
+			t.Fatalf("OnDelete calls = %v, want exactly one", got)
+		}
+	})
+}
+
+func tempFileInDirW(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

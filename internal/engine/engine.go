@@ -221,14 +221,20 @@ func (eng *Engine) IndexFile(path string) error {
 
 // logIndexError records an index failure via the per-path upsert.
 func (eng *Engine) logIndexError(path string, err error) {
+	eng.upsertError(path, fmt.Sprintf("index: %v", err))
+}
+
+// upsertError records an error for a path, replacing any previous error row
+// for that path (latest failure state wins; duplicates never accumulate).
+func (eng *Engine) upsertError(path, detail string) {
 	entry := domain.ActivityLogEntry{
 		Timestamp: time.Now(),
 		Path:      path,
 		Action:    "error",
-		Detail:    fmt.Sprintf("index: %v", err),
+		Detail:    detail,
 	}
-	if lerr := eng.store.UpsertLogEntry(entry); lerr != nil {
-		log.Printf("engine: log index error: %v", lerr)
+	if err := eng.store.UpsertLogEntry(entry); err != nil {
+		log.Printf("engine: log error row: %v", err)
 	}
 }
 
@@ -403,11 +409,7 @@ func (eng *Engine) Search(params domain.SearchParams) ([]domain.SearchResult, er
 		params.Limit = 10
 	}
 	if params.Threshold <= 0 {
-		provider, _ := eng.store.GetConfig("embedding_provider")
-		if provider == "" {
-			provider = embeddings.DefaultProvider()
-		}
-		params.Threshold = embeddings.DefaultThreshold(provider)
+		params.Threshold = embeddings.DefaultThreshold(eng.resolvedProvider())
 	}
 
 	vector, err := eng.embedder.EmbedQuery(params.Query)
@@ -466,7 +468,9 @@ func (eng *Engine) AddDirectory(path string) error {
 		log.Printf("engine: walk directory %s: %v", path, walkErr)
 	}
 
-	eng.indexWG.Add(1)
+	if !eng.tryBeginIndexWork() {
+		return nil // shutting down
+	}
 	defer eng.indexWG.Done()
 
 	eng.mu.Lock()
@@ -494,6 +498,11 @@ func (eng *Engine) AddDirectory(path string) error {
 		eng.indexedFiles++
 		eng.mu.Unlock()
 	}
+
+	// The index identity (fingerprint) must exist as soon as the first index
+	// run completes — a fresh onboarding session's DB would otherwise carry no
+	// fingerprint until the next launch, leaving the read-only guard inactive.
+	eng.recordIndexIdentity()
 	return nil
 }
 
@@ -610,7 +619,9 @@ func (eng *Engine) initialScan() {
 		return
 	}
 
-	eng.indexWG.Add(1)
+	if !eng.tryBeginIndexWork() {
+		return // shutting down
+	}
 	defer eng.indexWG.Done()
 
 	eng.mu.Lock()
@@ -657,13 +668,43 @@ func (eng *Engine) initialScan() {
 // (granite-97m) is also 384-dim. The bare dimension is kept alongside for
 // backward compatibility with DBs written before the fingerprint existed.
 func (eng *Engine) recordIndexIdentity() {
-	provider, _ := eng.store.GetConfig("embedding_provider")
-	if provider == "" {
-		provider = embeddings.DefaultProvider()
+	fp := embeddings.Fingerprint(eng.resolvedProvider(), eng.embedder)
+	if err := eng.store.SetConfig("embedding_fingerprint", fp); err != nil {
+		log.Printf("engine: record fingerprint: %v", err)
 	}
-	fp := fmt.Sprintf("%s:%s:%d", provider, eng.embedder.ModelName(), eng.embedder.Dimensions())
-	eng.store.SetConfig("embedding_fingerprint", fp)
-	eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions()))
+	if err := eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions())); err != nil {
+		log.Printf("engine: record dimension: %v", err)
+	}
+}
+
+// resolvedProvider resolves the active provider through the single shared
+// policy (config value, else key-implies-openai, else default) — the same rule
+// the composition root and read-only search apply.
+func (eng *Engine) resolvedProvider() string {
+	provider, _ := eng.store.GetConfig("embedding_provider")
+	apiKey, _ := eng.store.GetConfig("openai_api_key")
+	return embeddings.ResolveProvider(provider, apiKey)
+}
+
+// tryBeginIndexWork registers in-flight indexing work with the WaitGroup that
+// Stop() waits on, refusing if Stop has already been called. The check and the
+// Add happen under the same mutex that Stop uses to close stopCh, so an Add
+// can never race Stop's Wait — without this, a watcher debounce timer that
+// fired just before watcher.Stop cancels timers could Add during/after Wait
+// and the store would shut down under an active write (or trip the WaitGroup
+// Add-concurrent-with-Wait panic).
+func (eng *Engine) tryBeginIndexWork() bool {
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	if eng.stopCh != nil {
+		select {
+		case <-eng.stopCh:
+			return false // Stop already called
+		default:
+		}
+	}
+	eng.indexWG.Add(1)
+	return true
 }
 
 // stopped reports whether Stop has been called (i.e. stopCh is closed).
@@ -759,7 +800,9 @@ func (eng *Engine) OnCreate(path string) {
 		eng.logActivity(path, "ignored", "matched ignore pattern")
 		return
 	}
-	eng.indexWG.Add(1)
+	if !eng.tryBeginIndexWork() {
+		return // shutting down
+	}
 	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnCreate %s: %v", path, err)
@@ -777,7 +820,9 @@ func (eng *Engine) OnModify(path string) {
 		eng.logActivity(path, "ignored", "matched ignore pattern")
 		return
 	}
-	eng.indexWG.Add(1)
+	if !eng.tryBeginIndexWork() {
+		return // shutting down
+	}
 	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnModify %s: %v", path, err)
@@ -787,7 +832,10 @@ func (eng *Engine) OnModify(path string) {
 // OnDelete handles file deletion events by removing the file from the index.
 func (eng *Engine) OnDelete(path string) {
 	if err := eng.RemoveFileFromIndex(path); err != nil {
-		eng.logActivity(path, "error", fmt.Sprintf("delete: %v", err))
+		// Same per-path upsert policy as index errors: one living "error" row
+		// per path, latest failure state wins (a path either fails to index or
+		// fails to delete — its most recent error is the relevant one).
+		eng.upsertError(path, fmt.Sprintf("delete: %v", err))
 		log.Printf("engine: OnDelete %s: %v", path, err)
 	} else {
 		eng.logActivity(path, "deleted", "")

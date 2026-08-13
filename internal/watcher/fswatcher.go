@@ -131,10 +131,23 @@ func (fw *FSWatcher) debounce(path string, op fsnotify.Op) {
 
 // dispatch classifies a merged op set. Precedence: a removal ends the story
 // regardless of what preceded it; a creation outranks the writes that filled
-// the new file with content.
+// the new file with content. Exception: atomic-save editors (vim with
+// backupcopy=no, and similar rename-then-recreate patterns) emit RENAME then
+// CREATE for the same path within one debounce window — the merged set carries
+// Rename, but the file still exists and must not be dropped from the index, so
+// a Remove/Rename verdict is confirmed against the filesystem before firing.
 func (fw *FSWatcher) dispatch(path string, op fsnotify.Op) {
 	switch {
 	case op.Has(fsnotify.Remove) || op.Has(fsnotify.Rename):
+		if _, err := os.Stat(path); err == nil {
+			// Path still exists: rename-and-recreate, not a deletion.
+			if op.Has(fsnotify.Create) {
+				fw.handler.OnCreate(path)
+			} else {
+				fw.handler.OnModify(path)
+			}
+			return
+		}
 		fw.handler.OnDelete(path)
 	case op.Has(fsnotify.Create):
 		fw.handler.OnCreate(path)

@@ -1,10 +1,38 @@
 package embeddings
 
+import "fmt"
+
 // Provider identifiers for the supported embedding backends.
 const (
 	ProviderLocal  = "local"
 	ProviderOpenAI = "openai"
 )
+
+// ResolveProvider applies the single provider-resolution policy: an explicit
+// configured provider wins; otherwise an existing OpenAI key implies the
+// openai provider (preserving pre-provider-config users); otherwise the
+// default. Every consumer of a stored provider string (composition root,
+// engine, read-only search) must resolve through here — divergent copies of
+// this rule are how a legacy DB gets a 'local' threshold and fingerprint
+// applied to an OpenAI index.
+func ResolveProvider(configuredProvider, apiKey string) string {
+	if configuredProvider != "" {
+		return configuredProvider
+	}
+	if apiKey != "" {
+		return ProviderOpenAI
+	}
+	return DefaultProvider()
+}
+
+// Fingerprint returns the canonical index-identity string
+// (provider:model:dimensions) recorded when an index is built and compared
+// before read-only searches. Writer and checker must both use this
+// constructor — a hand-built copy that drifts makes every valid index look
+// mismatched, or a real mismatch look valid.
+func Fingerprint(provider string, e Embedder) string {
+	return fmt.Sprintf("%s:%s:%d", provider, e.ModelName(), e.Dimensions())
+}
 
 // Default model identifiers per provider.
 const (
@@ -51,19 +79,24 @@ func DefaultDimension(provider, model string) int {
 // given provider. Results farther than this are excluded when a caller does not
 // supply an explicit threshold.
 //
-// sqlite-vec's vec0 tables use cosine distance by default, and our embedding
-// vectors are L2-normalized, so cosine distance is the correct metric to
-// threshold on for both providers.
+// METRIC NOTE (flagged in the PR #2 review round): the chunk_embeddings vec0
+// table is declared without distance_metric, so sqlite-vec returns EUCLIDEAN
+// (L2) distance, not cosine. Because every vector we store is L2-normalized,
+// the two are monotonically equivalent (L2 = sqrt(2·cosine_distance)), so
+// ranking is identical either way — but these threshold values are therefore
+// L2-scale cutoffs, not the cosine values earlier comments claimed. On the L2
+// scale the Phase 0 mE5 ranges map to: related ≈0.51–0.60, cross-lingual
+// ≈0.58–0.66, unrelated ≈0.76. The local 0.6 cutoff (field-validated for
+// same-language search) truncates part of the cross-lingual band; whether to
+// declare distance_metric=cosine (table rebuild) or retune the L2 value
+// (~0.66–0.70) is an owner decision recorded in the PR review notes.
 func DefaultThreshold(provider string) float32 {
 	switch provider {
 	case ProviderOpenAI:
 		return 1.5
 	default:
-		// ProviderLocal (and any unrecognized provider). This is an initial
-		// value derived from the Phase 0 spike's cosine-distance ranges for the
-		// multilingual-e5-small model (related ~0.13–0.18, cross-lingual
-		// ~0.17–0.22, unrelated ~0.29). It is intentionally conservative and is
-		// tunable pending real-corpus evaluation.
+		// ProviderLocal (and any unrecognized provider). L2-scale cutoff,
+		// see METRIC NOTE. Tunable pending real-corpus evaluation.
 		return 0.6
 	}
 }

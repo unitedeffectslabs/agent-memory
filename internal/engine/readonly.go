@@ -28,10 +28,15 @@ func (ro *ReadOnlyEngine) Search(params domain.SearchParams) ([]domain.SearchRes
 		params.Limit = 10
 	}
 
-	provider, _ := ro.store.GetConfig("embedding_provider")
-	if provider == "" {
-		provider = embeddings.DefaultProvider()
-	}
+	// Resolve the provider through the SAME policy the composition root used
+	// to build this process's embedder (config, else key-implies-openai, else
+	// default). Reading the config value alone would diverge on legacy DBs
+	// where only an API key is set: main.go wires an OpenAI embedder while a
+	// config-only read here would resolve 'local' — mis-picking the threshold
+	// and mislabeling the fingerprint.
+	providerCfg, _ := ro.store.GetConfig("embedding_provider")
+	apiKey, _ := ro.store.GetConfig("openai_api_key")
+	provider := embeddings.ResolveProvider(providerCfg, apiKey)
 	if params.Threshold <= 0 {
 		params.Threshold = embeddings.DefaultThreshold(provider)
 	}
@@ -41,7 +46,7 @@ func (ro *ReadOnlyEngine) Search(params domain.SearchParams) ([]domain.SearchRes
 	// fingerprint (provider:model:dimensions, per the epic) catches
 	// same-dimension model swaps that the bare dimension cannot; the dimension
 	// check remains as fallback for DBs written before the fingerprint existed.
-	ownFP := fmt.Sprintf("%s:%s:%d", provider, ro.embedder.ModelName(), ro.embedder.Dimensions())
+	ownFP := embeddings.Fingerprint(provider, ro.embedder)
 	if indexFP, _ := ro.store.GetConfig("embedding_fingerprint"); indexFP != "" {
 		if indexFP != ownFP {
 			return nil, fmt.Errorf("index was built with embedding %q but this process is configured for %q — mixed vectors would return garbage-ranked results; reopen the GUI app to rebuild the index", indexFP, ownFP)

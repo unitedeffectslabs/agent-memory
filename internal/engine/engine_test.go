@@ -458,7 +458,6 @@ func TestAddDirectorySkipsIgnoredFiles(t *testing.T) {
 		GetFileByPathFn: func(path string) (*domain.File, error) {
 			return nil, nil
 		},
-		InsertChunksFn: func(fileID int64, chunks []domain.Chunk) error { return nil },
 	}
 
 	// Track indexed paths via the atomic replace call.

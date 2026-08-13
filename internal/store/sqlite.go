@@ -276,29 +276,16 @@ func (s *SQLiteStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk)
 	}
 	defer tx.Rollback()
 
-	// Remove existing chunks + vectors (no-op for a brand-new file).
+	// Remove existing chunks + vectors (no-op for a brand-new file). Single
+	// statements — a per-chunk DELETE loop would hold the write lock for
+	// hundreds of round-trips on the one connection exactly when the watcher
+	// is busiest.
 	if f.ID != 0 {
-		rows, err := tx.Query(`SELECT id FROM chunks WHERE file_id = ?`, f.ID)
-		if err != nil {
+		if _, err := tx.Exec(
+			`DELETE FROM chunk_embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)`,
+			f.ID,
+		); err != nil {
 			return err
-		}
-		var ids []int64
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		for _, id := range ids {
-			if _, err := tx.Exec(`DELETE FROM chunk_embeddings WHERE chunk_id = ?`, id); err != nil {
-				return err
-			}
 		}
 		if _, err := tx.Exec(`DELETE FROM chunks WHERE file_id = ?`, f.ID); err != nil {
 			return err
@@ -487,21 +474,30 @@ func (s *SQLiteStore) InsertLogEntry(entry domain.ActivityLogEntry) error {
 	return err
 }
 
-// UpsertLogEntry updates the existing (path, action) row's timestamp and
-// detail in place, inserting only if none exists — one living row per
-// failing path instead of an identical append per launch.
+// UpsertLogEntry replaces all existing (path, action) rows with this single
+// entry, in one transaction — one living row per failing path instead of an
+// identical append per launch. Delete-then-insert (rather than UPDATE) also
+// collapses duplicate rows accumulated by pre-upsert builds the first time a
+// path fails again after upgrading.
 func (s *SQLiteStore) UpsertLogEntry(entry domain.ActivityLogEntry) error {
-	res, err := s.db.Exec(
-		`UPDATE activity_log SET timestamp = ?, detail = ? WHERE path = ? AND action = ?`,
-		entry.Timestamp.UTC(), entry.Detail, entry.Path, entry.Action,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	if n, err := res.RowsAffected(); err == nil && n > 0 {
-		return nil
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`DELETE FROM activity_log WHERE path = ? AND action = ?`,
+		entry.Path, entry.Action,
+	); err != nil {
+		return err
 	}
-	return s.InsertLogEntry(entry)
+	if _, err := tx.Exec(
+		`INSERT INTO activity_log(timestamp, path, action, detail) VALUES(?, ?, ?, ?)`,
+		entry.Timestamp.UTC(), entry.Path, entry.Action, entry.Detail,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) ListLogEntries(limit, offset int) ([]domain.ActivityLogEntry, int, error) {
