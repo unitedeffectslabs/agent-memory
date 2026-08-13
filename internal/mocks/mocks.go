@@ -14,24 +14,22 @@ import (
 // ---------------------------------------------------------------------------
 
 type MockStore struct {
-	GetConfigFn         func(key string) (string, error)
-	SetConfigFn         func(key, value string) error
-	AddDirectoryFn      func(path string) error
-	RemoveDirectoryFn   func(path string) error
-	ListDirectoriesFn   func() ([]domain.Directory, error)
-	UpsertFileFn        func(f domain.File) error
-	RemoveFileFn        func(path string) error
-	GetFileByPathFn     func(path string) (*domain.File, error)
-	InsertChunksFn      func(fileID int64, chunks []domain.Chunk) error
+	GetConfigFn            func(key string) (string, error)
+	SetConfigFn            func(key, value string) error
+	AddDirectoryFn         func(path string) error
+	RemoveDirectoryFn      func(path string) error
+	ListDirectoriesFn      func() ([]domain.Directory, error)
+	RemoveFileFn           func(path string) error
+	GetFileByPathFn        func(path string) (*domain.File, error)
 	UpsertFileWithChunksFn func(f domain.File, chunks []domain.Chunk) error
 	UpsertLogEntryFn       func(entry domain.ActivityLogEntry) error
-	RemoveChunksByFileFn func(fileID int64) error
-	SearchFn            func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
-	StatsFn             func() (domain.IndexStats, error)
-	InsertLogEntryFn    func(entry domain.ActivityLogEntry) error
-	ListLogEntriesFn    func(limit, offset int) ([]domain.ActivityLogEntry, int, error)
-	ResetFn             func(embeddingDimension int) error
-	CloseFn             func() error
+	RemoveChunksByFileFn   func(fileID int64) error
+	SearchFn               func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
+	StatsFn                func() (domain.IndexStats, error)
+	InsertLogEntryFn       func(entry domain.ActivityLogEntry) error
+	ListLogEntriesFn       func(limit, offset int) ([]domain.ActivityLogEntry, int, error)
+	ResetFn                func(embeddingDimension int) error
+	CloseFn                func() error
 }
 
 func (m *MockStore) GetConfig(key string) (string, error) {
@@ -69,13 +67,6 @@ func (m *MockStore) ListDirectories() ([]domain.Directory, error) {
 	return nil, nil
 }
 
-func (m *MockStore) UpsertFile(f domain.File) error {
-	if m.UpsertFileFn != nil {
-		return m.UpsertFileFn(f)
-	}
-	return nil
-}
-
 func (m *MockStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk) error {
 	if m.UpsertFileWithChunksFn != nil {
 		return m.UpsertFileWithChunksFn(f, chunks)
@@ -102,13 +93,6 @@ func (m *MockStore) GetFileByPath(path string) (*domain.File, error) {
 		return m.GetFileByPathFn(path)
 	}
 	return nil, nil
-}
-
-func (m *MockStore) InsertChunks(fileID int64, chunks []domain.Chunk) error {
-	if m.InsertChunksFn != nil {
-		return m.InsertChunksFn(fileID, chunks)
-	}
-	return nil
 }
 
 func (m *MockStore) RemoveChunksByFile(fileID int64) error {
