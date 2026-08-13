@@ -22,8 +22,8 @@ export default function App() {
 
   async function checkOnboarding() {
     try {
-      const apiKey = await window.go.main.App.GetConfig('openai_api_key')
-      setNeedsOnboarding(!apiKey || apiKey.trim() === '')
+      const complete = await window.go.main.App.GetConfig('onboarding_complete')
+      setNeedsOnboarding(complete !== 'true')
     } catch {
       setNeedsOnboarding(true)
     }

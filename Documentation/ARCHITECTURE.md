@@ -17,7 +17,7 @@ Delivery  ->  Service (Engine)  ->  Domain (interfaces)  ->  Infrastructure (imp
 
 **Domain** — each package defines its own interface in `iface.go`. No cross-domain imports.
 
-**Infrastructure** — concrete implementations that satisfy domain interfaces: SQLite, OpenAI API, fsnotify, file extractor.
+**Infrastructure** — concrete implementations that satisfy domain interfaces: SQLite, the embedding providers (local ONNX model and OpenAI API), fsnotify, file extractor.
 
 ## Composition Root
 
@@ -30,7 +30,7 @@ Six interfaces, each in its own package:
 | Interface | Package | Defined in | Implemented by |
 |-----------|---------|------------|----------------|
 | `Store` | `internal/store` | `iface.go` | `sqlite.go` (SQLite + sqlite-vec) |
-| `Embedder` | `internal/embeddings` | `iface.go` | `openai.go` (OpenAI API) |
+| `Embedder` | `internal/embeddings` | `iface.go` | `local/` (bundled ONNX model, **default**) and `openai.go` (OpenAI API, opt-in) |
 | `Chunker` | `internal/chunker` | `iface.go` | `chunker.go` (tiktoken, cl100k_base) |
 | `Watcher` | `internal/watcher` | `iface.go` | `fswatcher.go` (fsnotify) |
 | `FileEventHandler` | `internal/watcher` | `iface.go` | `engine.go` (Engine implements OnCreate/OnModify/OnDelete) |
@@ -63,7 +63,8 @@ tray.go              System tray (macOS CGo)
 internal/
   domain/types.go    Shared types: Directory, File, Chunk, SearchResult, IndexStats, ActivityLogEntry
   store/             Store interface + SQLite implementation
-  embeddings/        Embedder interface + OpenAI implementation
+  embeddings/        Embedder interface + OpenAI implementation (opt-in)
+    local/           Bundled ONNX local embedder (default provider)
   chunker/           Chunker interface + token-based splitter
   watcher/           Watcher + FileEventHandler interfaces + fsnotify implementation
   extractor/         Extractor interface + multi-format file extraction
@@ -96,17 +97,36 @@ One binary, two modes controlled by the `--mcp` flag:
 
 Both share the same SQLite database. WAL mode supports concurrent readers with one writer. The GUI writes, the stdio process reads.
 
-## Embedding Model Change Flow
+## Embedding Providers
 
-When the user changes the embedding model in Settings:
+Two infrastructure implementations satisfy the same `Embedder` interface, so the engine, store, watcher, and MCP layers stay provider-agnostic:
 
-1. `app.SetConfig("embedding_model", newModel)` detects the change
-2. Persists the new model to the config table
-3. Creates a new embedder via the injected `EmbedderFactory` (so `app.go` never imports concrete embeddings)
-4. Calls `engine.SetEmbedder()` to swap it
+- **Local (default)** — `internal/embeddings/local/`. A bundled `multilingual-e5-small` ONNX model (384 dimensions) runs in-process on the CPU via ONNX Runtime (`yalue/onnxruntime_go`), with a Hugging Face tokenizer (`daulet/tokenizers`). The session is lazy-initialized on first use; inference tokenizes, runs the model, mean-pools over the attention mask, and L2-normalizes. In stdio (`--mcp`) mode the model loads lazily on the first search so the MCP handshake stays instant. Works fully offline.
+- **OpenAI (opt-in)** — `openai.go`. Used only when the user supplies an API key and selects the OpenAI provider in Settings.
+
+`main.go` picks the implementation from the `embedding_provider` config key; the local branch also wires the model-matched tokenizer into the chunker (via `chunker.WithTokenizer`) so chunk boundaries are measured in the model's own tokens.
+
+### Asset Bundling
+
+The native artifacts (ONNX model weights, tokenizer, ONNX Runtime shared library) are **not** committed to git. Instead:
+
+- `assets/manifest.json` (in git) pins each artifact's URL and SHA-256 checksum.
+- `make assets` downloads and checksum-verifies them into `assets/embedded/` (gitignored).
+- The `localembed`-tagged build embeds them into the binary via `go:embed`; on first use they are extracted (atomically, checksum-verified) to `~/.agent-memory/runtime/` because the ORT library must be `dlopen`-ed from a real file path.
+
+The native-lib-dependent code lives behind the `//go:build localembed` tag, so the default `go build`/`go test ./...` (and CI) stays lib-free and green; the pure-Go embedding pipeline is unit-testable without the tag. `make build` sets `-tags localembed` plus the `CGO_LDFLAGS` to link the tokenizer library.
+
+## Embedding Provider / Model Change Flow
+
+When the user changes the embedding provider or model in Settings:
+
+1. `app.SetConfig` detects the change (`embedding_provider` or `embedding_model`)
+2. Persists the new value to the config table
+3. Creates a new embedder via the injected `EmbedderFactory` (so `app.go` never imports concrete embeddings) — the factory maps the provider to `local.New(...)` or `NewOpenAIEmbedder(...)`
+4. Calls `engine.SetEmbedder()` (and, for a provider switch, swaps the matching chunker/tokenizer) to swap it
 5. Calls `engine.Reset()` which stops the watcher, drops and recreates the vector table with the new dimension, and restarts
 
-The same factory pattern applies when the API key changes — the embedder is swapped so new requests use the updated key immediately.
+The same factory pattern applies when the OpenAI API key changes — the embedder is swapped so new requests use the updated key immediately.
 
 ## Testing
 

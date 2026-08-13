@@ -5,12 +5,14 @@ go 1.24.0
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/daulet/tokenizers v1.27.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/nguyenthenguyen/docx v0.0.0-20230621112118-9c8e795a11db
 	github.com/tiktoken-go/tokenizer v0.2.0
 	github.com/wailsapp/wails/v2 v2.11.0
 	github.com/xuri/excelize/v2 v2.10.1
+	github.com/yalue/onnxruntime_go v1.31.0
 )
 
 require (

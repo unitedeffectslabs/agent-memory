@@ -1,21 +1,35 @@
 import React, { useState } from 'react'
 
+const OPENAI_MODELS = ['text-embedding-3-small', 'text-embedding-3-large']
+
 export default function Onboarding({ onComplete }) {
   const [step, setStep] = useState(0)
+  const [useOpenAI, setUseOpenAI] = useState(false)
   const [apiKey, setApiKey] = useState('')
+  const [openaiModel, setOpenaiModel] = useState('text-embedding-3-small')
   const [dirs, setDirs] = useState([])
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
-  async function handleSaveApiKey() {
-    if (!apiKey.trim()) { setError('API key is required.'); return }
-    setSaving(true); setError('')
-    try {
-      await window.go.main.App.SetConfig('openai_api_key', apiKey.trim())
-      setStep(2)
-    } catch (e) {
-      setError('Failed to save: ' + (e?.message || String(e)))
-    } finally { setSaving(false) }
+  // Welcome → directories. If the user opted into OpenAI, persist that provider
+  // choice here; otherwise the backend keeps the default (local) provider.
+  async function handleStartFromWelcome() {
+    setError('')
+    if (useOpenAI) {
+      if (!apiKey.trim()) { setError('API key is required to use OpenAI.'); return }
+      setSaving(true)
+      try {
+        await window.go.main.App.SetConfig('embedding_provider', 'openai')
+        await window.go.main.App.SetConfig('openai_api_key', apiKey.trim())
+        await window.go.main.App.SetConfig('embedding_model', openaiModel)
+      } catch (e) {
+        setError('Failed to save OpenAI settings: ' + (e?.message || String(e)))
+        setSaving(false)
+        return
+      }
+      setSaving(false)
+    }
+    setStep(1)
   }
 
   async function handleChooseFolder() {
@@ -41,17 +55,24 @@ export default function Onboarding({ onComplete }) {
       for (const path of dirs) {
         await window.go.main.App.RegisterDirectory(path)
       }
-      setStep(3)
+      setStep(2)
     } catch (e) {
       setError('Failed to save directories: ' + (e?.message || String(e)))
     }
   }
 
-  function handleFinish() {
+  async function handleFinish() {
+    setError('')
+    try {
+      await window.go.main.App.SetConfig('onboarding_complete', 'true')
+    } catch (e) {
+      setError('Failed to finish setup: ' + (e?.message || String(e)))
+      return
+    }
     onComplete()
   }
 
-  const totalSteps = 4
+  const totalSteps = 3
 
   return (
     <div style={s.container}>
@@ -67,42 +88,66 @@ export default function Onboarding({ onComplete }) {
           <>
             <h2 style={s.heading}>Welcome to Agent Memory</h2>
             <p style={s.text}>
-              Agent Memory watches your directories, creates embeddings with OpenAI,
-              and stores vectors locally. It provides semantic search via MCP for
-              Claude and other AI assistants.
+              Agent Memory watches your directories, creates embeddings, and stores
+              vectors locally. It provides semantic search via MCP for Claude and
+              other AI assistants.
             </p>
-            <div style={s.btnRow}>
-              <button style={s.btnPrimary} onClick={() => setStep(1)}>Get Started</button>
-            </div>
-          </>
-        )}
-
-        {step === 1 && (
-          <>
-            <h2 style={s.heading}>OpenAI API Key</h2>
             <p style={s.text}>
-              Enter your OpenAI API key to enable embeddings.
-              It's stored locally in the database — never sent anywhere except OpenAI.
+              By default it runs a local, on-device embedding model — private, no
+              API key, and fully offline. You can switch to OpenAI anytime in Settings.
             </p>
-            <input
-              type="password"
-              style={s.input}
-              placeholder="sk-..."
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSaveApiKey()}
-            />
-            {error && <div style={s.error}>{error}</div>}
-            <div style={s.btnRow}>
-              <button style={s.btn} onClick={() => setStep(0)}>Back</button>
-              <button style={s.btnPrimary} onClick={handleSaveApiKey} disabled={saving}>
-                {saving ? 'Saving...' : 'Continue'}
+
+            {/* Optional: opt into OpenAI instead of the local default */}
+            {!useOpenAI ? (
+              <button
+                style={s.linkBtn}
+                onClick={() => { setError(''); setUseOpenAI(true) }}
+              >
+                Use OpenAI instead
+              </button>
+            ) : (
+              <div style={s.openaiBox}>
+                <div style={s.openaiHeader}>
+                  <span style={s.openaiTitle}>Use OpenAI</span>
+                  <button
+                    style={s.linkBtn}
+                    onClick={() => { setError(''); setUseOpenAI(false) }}
+                  >
+                    Use local model instead
+                  </button>
+                </div>
+                <p style={{ ...s.text, marginBottom: 12 }}>
+                  Higher quality, but requires an API key and sends text to OpenAI.
+                  The key is stored locally in the database.
+                </p>
+                <input
+                  type="password"
+                  style={s.input}
+                  placeholder="sk-..."
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+                <select
+                  style={s.select}
+                  value={openaiModel}
+                  onChange={(e) => setOpenaiModel(e.target.value)}
+                >
+                  {OPENAI_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+            )}
+
+            {error && <div style={{ ...s.error, marginTop: 12 }}>{error}</div>}
+
+            <div style={{ ...s.btnRow, marginTop: 20 }}>
+              <button style={s.btnPrimary} onClick={handleStartFromWelcome} disabled={saving}>
+                {saving ? 'Saving...' : 'Get Started'}
               </button>
             </div>
           </>
         )}
 
-        {step === 2 && (
+        {step === 1 && (
           <>
             <h2 style={s.heading}>Add Directories</h2>
             <p style={s.text}>
@@ -137,7 +182,7 @@ export default function Onboarding({ onComplete }) {
             {error && <div style={{ ...s.error, marginTop: 12 }}>{error}</div>}
 
             <div style={{ ...s.btnRow, marginTop: 20 }}>
-              <button style={s.btn} onClick={() => setStep(1)}>Back</button>
+              <button style={s.btn} onClick={() => setStep(0)}>Back</button>
               <button
                 style={{ ...s.btnPrimary, ...(dirs.length === 0 ? s.btnDisabled : {}) }}
                 onClick={handleSaveDirsAndContinue}
@@ -149,7 +194,7 @@ export default function Onboarding({ onComplete }) {
           </>
         )}
 
-        {step === 3 && (
+        {step === 2 && (
           <>
             <h2 style={s.heading}>All Set</h2>
             <p style={s.text}>
@@ -221,8 +266,45 @@ const s = {
     borderRadius: 8,
     color: '#e5e5e7',
     fontSize: 14,
-    marginBottom: 16,
+    marginBottom: 12,
     outline: 'none',
+  },
+  select: {
+    width: '100%',
+    padding: '10px 12px',
+    background: 'rgba(255,255,255,0.06)',
+    border: '1px solid rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    color: '#e5e5e7',
+    fontSize: 14,
+    outline: 'none',
+    cursor: 'pointer',
+  },
+  linkBtn: {
+    background: 'none',
+    border: 'none',
+    color: '#0a84ff',
+    fontSize: 13,
+    cursor: 'pointer',
+    padding: 0,
+    fontWeight: 500,
+  },
+  openaiBox: {
+    background: 'rgba(255,255,255,0.03)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    borderRadius: 10,
+    padding: 16,
+  },
+  openaiHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  openaiTitle: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#fff',
   },
   dirList: {
     display: 'flex',

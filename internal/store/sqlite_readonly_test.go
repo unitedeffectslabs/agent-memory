@@ -11,7 +11,7 @@ func TestReadOnlyStore_OpensInitializedDB(t *testing.T) {
 	dbPath := filepath.Join(dir, "test.db")
 
 	// Create and initialize with the read-write constructor.
-	rw, err := NewSQLiteStore(dbPath)
+	rw, err := NewSQLiteStore(dbPath, 1536)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

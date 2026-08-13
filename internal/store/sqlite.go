@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"time"
 
@@ -13,13 +14,26 @@ import (
 	"github.com/borzou/vecstore/internal/domain"
 )
 
+// defaultVecDimension is the fallback embedding dimension used when a caller
+// does not supply one (dim <= 0). It matches OpenAI text-embedding-3-small,
+// preserving the historical schema for databases created before dimensions
+// were provider-driven.
+const defaultVecDimension = 1536
+
 // SQLiteStore implements Store using SQLite + sqlite-vec.
 type SQLiteStore struct {
 	db *sql.DB
 }
 
-// NewSQLiteStore opens (or creates) a SQLite database at dbPath and initializes the schema.
-func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
+// NewSQLiteStore opens (or creates) a SQLite database at dbPath and initializes
+// the schema. dim sets the width of the vector table for a freshly created
+// database; a value <= 0 falls back to defaultVecDimension. Existing databases
+// are unaffected — the vector table is created with CREATE ... IF NOT EXISTS, so
+// the stored dimension always wins for an already-migrated DB.
+func NewSQLiteStore(dbPath string, dim int) (*SQLiteStore, error) {
+	if dim <= 0 {
+		dim = defaultVecDimension
+	}
 	sqlite_vec.Auto()
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
@@ -31,14 +45,42 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &SQLiteStore{db: db}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(dim); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := s.pruneActivityLog(); err != nil {
+		// Retention is hygiene, not correctness — log-worthy upstream but must
+		// never block opening the store.
+		log.Printf("store: prune activity log: %v", err)
 	}
 	return s, nil
 }
 
-func (s *SQLiteStore) migrate() error {
+// Activity-log retention: entries older than the TTL are dropped, and the
+// table is capped to the newest logRetentionMaxRows. Without this the table
+// grows without bound (the Log page pays COUNT(*) over it every poll, on the
+// single connection, in contention with indexing writes).
+const (
+	logRetentionDays    = 30
+	logRetentionMaxRows = 5000
+)
+
+// pruneActivityLog applies the TTL and row cap. Called at store open.
+func (s *SQLiteStore) pruneActivityLog() error {
+	cutoff := time.Now().UTC().AddDate(0, 0, -logRetentionDays)
+	if _, err := s.db.Exec(`DELETE FROM activity_log WHERE timestamp < ?`, cutoff); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(
+		`DELETE FROM activity_log WHERE id NOT IN
+		   (SELECT id FROM activity_log ORDER BY timestamp DESC LIMIT ?)`,
+		logRetentionMaxRows,
+	)
+	return err
+}
+
+func (s *SQLiteStore) migrate(dim int) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS config (
 			key   TEXT PRIMARY KEY,
@@ -68,10 +110,10 @@ func (s *SQLiteStore) migrate() error {
 			token_count INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 		)`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_embeddings USING vec0(
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_embeddings USING vec0(
 			chunk_id  INTEGER PRIMARY KEY,
-			embedding FLOAT[1536]
-		)`,
+			embedding FLOAT[%d]
+		)`, dim),
 		`CREATE TABLE IF NOT EXISTS activity_log (
 			id        INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp DATETIME NOT NULL,
@@ -221,6 +263,79 @@ func (s *SQLiteStore) InsertChunks(fileID int64, chunks []domain.Chunk) error {
 	return tx.Commit()
 }
 
+// UpsertFileWithChunks atomically replaces a file's index entry in a single
+// transaction: delete the file's old chunks + vectors, upsert the file row,
+// insert the new chunks + vectors. Atomicity is the crash-safety guarantee for
+// indexing: without it, a process death after the file row is written but
+// before its chunks land records the file as indexed-at-hash with no content,
+// and the hash short-circuit then skips it forever.
+func (s *SQLiteStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Remove existing chunks + vectors (no-op for a brand-new file). Single
+	// statements — a per-chunk DELETE loop would hold the write lock for
+	// hundreds of round-trips on the one connection exactly when the watcher
+	// is busiest.
+	if f.ID != 0 {
+		if _, err := tx.Exec(
+			`DELETE FROM chunk_embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)`,
+			f.ID,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM chunks WHERE file_id = ?`, f.ID); err != nil {
+			return err
+		}
+	}
+
+	// Upsert the file row and resolve its (possibly new) ID within the tx.
+	res, err := tx.Exec(
+		`INSERT OR REPLACE INTO files(directory_id, path, hash, indexed_at) VALUES(?, ?, ?, ?)`,
+		f.DirectoryID, f.Path, f.Hash, f.IndexedAt.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert file: %w", err)
+	}
+	fileID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	stmtChunk, err := tx.Prepare(`INSERT INTO chunks(file_id, chunk_index, content, token_count) VALUES(?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmtChunk.Close()
+	stmtVec, err := tx.Prepare(`INSERT INTO chunk_embeddings(chunk_id, embedding) VALUES(?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmtVec.Close()
+
+	for _, c := range chunks {
+		res, err := stmtChunk.Exec(fileID, c.Index, c.Content, c.TokenCount)
+		if err != nil {
+			return fmt.Errorf("insert chunk: %w", err)
+		}
+		chunkID, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if len(c.Embedding) > 0 {
+			blob := float32SliceToBlob(c.Embedding)
+			if _, err := stmtVec.Exec(chunkID, blob); err != nil {
+				return fmt.Errorf("insert embedding: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) RemoveChunksByFile(fileID int64) error {
 	// Get chunk IDs first to remove from vec table.
 	rows, err := s.db.Query(`SELECT id FROM chunks WHERE file_id = ?`, fileID)
@@ -288,7 +403,9 @@ func (s *SQLiteStore) Search(embedding []float32, limit, offset int, threshold f
 	}
 	defer rows.Close()
 
-	var all []domain.SearchResult
+	// Non-nil so an empty result set serializes as [] (not null) all the way
+	// out through the MCP transports — strict JSON clients index into it.
+	all := make([]domain.SearchResult, 0, fetchLimit)
 	for rows.Next() {
 		var r domain.SearchResult
 		if err := rows.Scan(&r.ChunkIndex, &r.Content, &r.FilePath, &r.Score); err != nil {
@@ -307,7 +424,7 @@ func (s *SQLiteStore) Search(embedding []float32, limit, offset int, threshold f
 	if offset > 0 && offset < len(all) {
 		all = all[offset:]
 	} else if offset >= len(all) {
-		return nil, nil
+		return []domain.SearchResult{}, nil
 	}
 
 	// Apply limit.
@@ -338,11 +455,11 @@ func (s *SQLiteStore) Stats() (domain.IndexStats, error) {
 		stats.LastIndexedAt = parseTimestamp(lastIndexed.String)
 	}
 
-	model, _ := s.GetConfig("embedding_model")
-	if model == "" {
-		model = "text-embedding-3-small"
-	}
-	stats.EmbeddingModel = model
+	// Report the active provider/model straight from config. When config is
+	// empty (never configured) the fields are left empty rather than assuming a
+	// specific default, since the composition root owns provider selection.
+	stats.Provider, _ = s.GetConfig("embedding_provider")
+	stats.EmbeddingModel, _ = s.GetConfig("embedding_model")
 
 	return stats, nil
 }
@@ -355,6 +472,32 @@ func (s *SQLiteStore) InsertLogEntry(entry domain.ActivityLogEntry) error {
 		entry.Timestamp.UTC(), entry.Path, entry.Action, entry.Detail,
 	)
 	return err
+}
+
+// UpsertLogEntry replaces all existing (path, action) rows with this single
+// entry, in one transaction — one living row per failing path instead of an
+// identical append per launch. Delete-then-insert (rather than UPDATE) also
+// collapses duplicate rows accumulated by pre-upsert builds the first time a
+// path fails again after upgrading.
+func (s *SQLiteStore) UpsertLogEntry(entry domain.ActivityLogEntry) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`DELETE FROM activity_log WHERE path = ? AND action = ?`,
+		entry.Path, entry.Action,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO activity_log(timestamp, path, action, detail) VALUES(?, ?, ?, ?)`,
+		entry.Timestamp.UTC(), entry.Path, entry.Action, entry.Detail,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) ListLogEntries(limit, offset int) ([]domain.ActivityLogEntry, int, error) {
@@ -392,7 +535,7 @@ func (s *SQLiteStore) ListLogEntries(limit, offset int) ([]domain.ActivityLogEnt
 // directories are preserved so the user doesn't have to re-onboard.
 func (s *SQLiteStore) Reset(embeddingDimension int) error {
 	if embeddingDimension <= 0 {
-		embeddingDimension = 1536
+		embeddingDimension = defaultVecDimension
 	}
 
 	stmts := []string{

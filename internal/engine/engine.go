@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,7 +52,8 @@ type Engine struct {
 	extractor extractor.Extractor
 	mu        sync.Mutex
 	indexing  bool
-	stopCh    chan struct{} // closed by Stop() to cancel in-flight indexing
+	stopCh    chan struct{}  // closed by Stop() to cancel in-flight indexing
+	indexWG   sync.WaitGroup // tracks in-flight indexing work; Stop() waits on it so shutdown lands on a file boundary
 	// Progress tracking
 	indexedFiles int
 	totalToIndex int
@@ -72,6 +74,13 @@ func New(s store.Store, e embeddings.Embedder, c chunker.Chunker, w watcher.Watc
 // Must be called while the engine is stopped.
 func (eng *Engine) SetEmbedder(e embeddings.Embedder) {
 	eng.embedder = e
+}
+
+// SetChunker swaps the chunker. A provider switch must swap the chunker
+// alongside the embedder so the tokenizer and max-input clamp match the new
+// model. Must be called while the engine is stopped.
+func (eng *Engine) SetChunker(c chunker.Chunker) {
+	eng.chunker = c
 }
 
 // GetIgnorePatterns returns the current ignore pattern list. If none have been
@@ -196,8 +205,40 @@ func (eng *Engine) ListLogEntries(limit, offset int) ([]domain.ActivityLogEntry,
 }
 
 // IndexFile extracts text from a file, hashes it, and runs the chunk-embed-store
-// pipeline if the content has changed since the last index.
+// pipeline if the content has changed since the last index. Failures are
+// recorded in the activity log exactly once, here — callers must not add their
+// own logActivity for the returned error (stderr context lines are fine).
+// Error rows are upserted per path (timestamp/detail updated in place), so a
+// persistently-failing file keeps one living row instead of appending an
+// identical row every launch.
 func (eng *Engine) IndexFile(path string) error {
+	err := eng.indexFile(path)
+	if err != nil {
+		eng.logIndexError(path, err)
+	}
+	return err
+}
+
+// logIndexError records an index failure via the per-path upsert.
+func (eng *Engine) logIndexError(path string, err error) {
+	eng.upsertError(path, fmt.Sprintf("index: %v", err))
+}
+
+// upsertError records an error for a path, replacing any previous error row
+// for that path (latest failure state wins; duplicates never accumulate).
+func (eng *Engine) upsertError(path, detail string) {
+	entry := domain.ActivityLogEntry{
+		Timestamp: time.Now(),
+		Path:      path,
+		Action:    "error",
+		Detail:    detail,
+	}
+	if err := eng.store.UpsertLogEntry(entry); err != nil {
+		log.Printf("engine: log error row: %v", err)
+	}
+}
+
+func (eng *Engine) indexFile(path string) error {
 	// 1. Check if the file type is supported at all.
 	if !eng.extractor.IsSupported(path) {
 		eng.logActivity(path, "ignored", "unsupported file type")
@@ -223,7 +264,6 @@ func (eng *Engine) IndexFile(path string) error {
 	// 4. Extract text content (handles text, docx, xlsx, pptx, metadata, etc.)
 	result, err := eng.extractor.Extract(path)
 	if err != nil {
-		eng.logActivity(path, "error", fmt.Sprintf("extract: %v", err))
 		return fmt.Errorf("extract %s: %w", path, err)
 	}
 	if result.Text == "" {
@@ -262,14 +302,11 @@ func (eng *Engine) IndexFile(path string) error {
 		return fmt.Errorf("find directory for %s: %w", path, err)
 	}
 
-	// 9. Remove old chunks if file existed.
-	if existing != nil {
-		if err := eng.store.RemoveChunksByFile(existing.ID); err != nil {
-			return fmt.Errorf("remove old chunks for %s: %w", path, err)
-		}
-	}
-
-	// 10. Upsert file record.
+	// 9. Atomically replace the file's index entry (remove old chunks, upsert
+	// the file row, insert new chunks) in ONE transaction. A process death
+	// mid-index must leave the file either fully indexed or untouched — three
+	// separate writes could record the file at the new hash with zero chunks,
+	// and the hash short-circuit above would then skip it forever.
 	file := domain.File{
 		DirectoryID: dirID,
 		Path:        path,
@@ -279,29 +316,17 @@ func (eng *Engine) IndexFile(path string) error {
 	if existing != nil {
 		file.ID = existing.ID
 	}
-	if err := eng.store.UpsertFile(file); err != nil {
-		return fmt.Errorf("upsert file %s: %w", path, err)
-	}
-
-	// 11. Insert new chunks. Re-fetch the file ID because INSERT OR REPLACE
-	// may have assigned a new auto-increment ID.
-	stored, err := eng.store.GetFileByPath(path)
-	if err != nil {
-		return fmt.Errorf("get file after upsert %s: %w", path, err)
-	}
-	if stored == nil {
-		return fmt.Errorf("file not found after upsert: %s", path)
-	}
-	file.ID = stored.ID
-	if err := eng.store.InsertChunks(file.ID, domainChunks); err != nil {
-		return fmt.Errorf("insert chunks for %s: %w", path, err)
+	if err := eng.store.UpsertFileWithChunks(file, domainChunks); err != nil {
+		return fmt.Errorf("index write for %s: %w", path, err)
 	}
 
 	eng.logActivity(path, "indexed", fmt.Sprintf("%d chunks", len(domainChunks)))
 	return nil
 }
 
-// maxTokensPerBatch is the max tokens per OpenAI embedding API call.
+// maxTokensPerBatch is the max tokens per OpenAI embedding API call. This is
+// OpenAI-API-specific and harmless for a local embedder (which sub-batches
+// internally), since it only bounds how many chunks are sent per call.
 const maxTokensPerBatch = 250000 // conservative, API limit is 300K
 
 // embedBatched sends chunks to the embedder in batches that fit within the API
@@ -342,7 +367,7 @@ func (eng *Engine) embedSlice(chunks []chunker.ChunkResult) ([][]float32, error)
 	for i, c := range chunks {
 		texts[i] = c.Content
 	}
-	return eng.embedder.Embed(texts)
+	return eng.embedder.EmbedDocuments(texts)
 }
 
 // findDirectoryID returns the directory ID for the watched directory that
@@ -384,17 +409,17 @@ func (eng *Engine) Search(params domain.SearchParams) ([]domain.SearchResult, er
 		params.Limit = 10
 	}
 	if params.Threshold <= 0 {
-		params.Threshold = 1.5
+		params.Threshold = embeddings.DefaultThreshold(eng.resolvedProvider())
 	}
 
-	vectors, err := eng.embedder.Embed([]string{params.Query})
+	vector, err := eng.embedder.EmbedQuery(params.Query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	if len(vectors) == 0 {
+	if len(vector) == 0 {
 		return nil, fmt.Errorf("embedder returned no vectors")
 	}
-	return eng.store.Search(vectors[0], params.Limit, params.Offset, params.Threshold)
+	return eng.store.Search(vector, params.Limit, params.Offset, params.Threshold)
 }
 
 // AddDirectory adds a directory to the store and watcher, then walks and
@@ -443,6 +468,11 @@ func (eng *Engine) AddDirectory(path string) error {
 		log.Printf("engine: walk directory %s: %v", path, walkErr)
 	}
 
+	if !eng.tryBeginIndexWork() {
+		return nil // shutting down
+	}
+	defer eng.indexWG.Done()
+
 	eng.mu.Lock()
 	eng.indexing = true
 	eng.totalToIndex = len(filePaths)
@@ -468,6 +498,11 @@ func (eng *Engine) AddDirectory(path string) error {
 		eng.indexedFiles++
 		eng.mu.Unlock()
 	}
+
+	// The index identity (fingerprint) must exist as soon as the first index
+	// run completes — a fresh onboarding session's DB would otherwise carry no
+	// fingerprint until the next launch, leaving the read-only guard inactive.
+	eng.recordIndexIdentity()
 	return nil
 }
 
@@ -584,6 +619,11 @@ func (eng *Engine) initialScan() {
 		return
 	}
 
+	if !eng.tryBeginIndexWork() {
+		return // shutting down
+	}
+	defer eng.indexWG.Done()
+
 	eng.mu.Lock()
 	eng.indexing = true
 	eng.totalToIndex = len(filePaths)
@@ -617,6 +657,54 @@ func (eng *Engine) initialScan() {
 		}
 	}
 	log.Printf("engine: initial scan complete — %d files processed, %d errors", len(filePaths), errored)
+
+	eng.recordIndexIdentity()
+}
+
+// recordIndexIdentity persists what the index was built with so read-only
+// consumers can detect a mismatch before querying sqlite-vec. The full
+// fingerprint (provider:model:dimensions, per the epic) catches same-dimension
+// model swaps that a bare dimension cannot — e.g. the named upgrade candidate
+// (granite-97m) is also 384-dim. The bare dimension is kept alongside for
+// backward compatibility with DBs written before the fingerprint existed.
+func (eng *Engine) recordIndexIdentity() {
+	fp := embeddings.Fingerprint(eng.resolvedProvider(), eng.embedder)
+	if err := eng.store.SetConfig("embedding_fingerprint", fp); err != nil {
+		log.Printf("engine: record fingerprint: %v", err)
+	}
+	if err := eng.store.SetConfig("embedding_dimension", strconv.Itoa(eng.embedder.Dimensions())); err != nil {
+		log.Printf("engine: record dimension: %v", err)
+	}
+}
+
+// resolvedProvider resolves the active provider through the single shared
+// policy (config value, else key-implies-openai, else default) — the same rule
+// the composition root and read-only search apply.
+func (eng *Engine) resolvedProvider() string {
+	provider, _ := eng.store.GetConfig("embedding_provider")
+	apiKey, _ := eng.store.GetConfig("openai_api_key")
+	return embeddings.ResolveProvider(provider, apiKey)
+}
+
+// tryBeginIndexWork registers in-flight indexing work with the WaitGroup that
+// Stop() waits on, refusing if Stop has already been called. The check and the
+// Add happen under the same mutex that Stop uses to close stopCh, so an Add
+// can never race Stop's Wait — without this, a watcher debounce timer that
+// fired just before watcher.Stop cancels timers could Add during/after Wait
+// and the store would shut down under an active write (or trip the WaitGroup
+// Add-concurrent-with-Wait panic).
+func (eng *Engine) tryBeginIndexWork() bool {
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	if eng.stopCh != nil {
+		select {
+		case <-eng.stopCh:
+			return false // Stop already called
+		default:
+		}
+	}
+	eng.indexWG.Add(1)
+	return true
 }
 
 // stopped reports whether Stop has been called (i.e. stopCh is closed).
@@ -636,7 +724,10 @@ func (eng *Engine) stopped() bool {
 	}
 }
 
-// Stop stops the file watcher and cancels any in-flight indexing.
+// Stop stops the file watcher, cancels any in-flight indexing, and WAITS for
+// the in-flight work to reach a file boundary before returning. Callers that
+// close the store next (shutdown) rely on this: without the wait, an indexing
+// goroutine could still be writing while the store shuts down under it.
 func (eng *Engine) Stop() error {
 	eng.mu.Lock()
 	if eng.stopCh != nil {
@@ -651,7 +742,12 @@ func (eng *Engine) Stop() error {
 
 	eng.store.SetConfig("watcher_running", "false")
 
-	return eng.watcher.Stop()
+	err := eng.watcher.Stop()
+	// After stopCh is closed the scan loops exit at the next file boundary and
+	// the stopped watcher delivers no new events; this wait is bounded by one
+	// file's index time.
+	eng.indexWG.Wait()
+	return err
 }
 
 // Restart stops and then starts the file watcher.
@@ -671,6 +767,7 @@ func (eng *Engine) Reset() error {
 	if err := eng.store.Reset(eng.embedder.Dimensions()); err != nil {
 		return err
 	}
+	eng.recordIndexIdentity()
 	return eng.Start()
 }
 
@@ -703,6 +800,10 @@ func (eng *Engine) OnCreate(path string) {
 		eng.logActivity(path, "ignored", "matched ignore pattern")
 		return
 	}
+	if !eng.tryBeginIndexWork() {
+		return // shutting down
+	}
+	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnCreate %s: %v", path, err)
 	}
@@ -719,6 +820,10 @@ func (eng *Engine) OnModify(path string) {
 		eng.logActivity(path, "ignored", "matched ignore pattern")
 		return
 	}
+	if !eng.tryBeginIndexWork() {
+		return // shutting down
+	}
+	defer eng.indexWG.Done()
 	if err := eng.IndexFile(path); err != nil {
 		log.Printf("engine: OnModify %s: %v", path, err)
 	}
@@ -727,7 +832,10 @@ func (eng *Engine) OnModify(path string) {
 // OnDelete handles file deletion events by removing the file from the index.
 func (eng *Engine) OnDelete(path string) {
 	if err := eng.RemoveFileFromIndex(path); err != nil {
-		eng.logActivity(path, "error", fmt.Sprintf("delete: %v", err))
+		// Same per-path upsert policy as index errors: one living "error" row
+		// per path, latest failure state wins (a path either fails to index or
+		// fails to delete — its most recent error is the relevant one).
+		eng.upsertError(path, fmt.Sprintf("delete: %v", err))
 		log.Printf("engine: OnDelete %s: %v", path, err)
 	} else {
 		eng.logActivity(path, "deleted", "")

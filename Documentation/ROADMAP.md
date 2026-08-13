@@ -2,9 +2,10 @@
 
 ## Local Embeddings (Epic)
 
-Replace OpenAI as the default embedding provider with a bundled in-process local model
-(ONNX Runtime + multilingual-e5-small); OpenAI becomes an explicit opt-in backup. Full design
-and implementation plan: [Epics/local-embeddings.md](Epics/local-embeddings.md).
+**Implemented** — a bundled in-process local model (ONNX Runtime + `multilingual-e5-small`, 384-dim)
+is now the default embedding provider, working fully offline with no API key; OpenAI is an explicit
+opt-in in Settings. Working on macOS arm64; cross-platform builds (Linux, Windows, macOS x86_64)
+are the remaining phase. Full design and status: [Epics/local-embeddings.md](Epics/local-embeddings.md).
 
 ## Search Configuration UI
 

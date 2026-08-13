@@ -1,7 +1,13 @@
 # Epic: Local Embeddings as the Primary Provider
 
 **Date:** 2026-07-02
-**Status:** Proposed
+**Status:** Complete pending review — all phases (0–6) executed and verified. Every shipping
+target (macOS arm64/x86_64, Linux arm64/x64, Windows x64) built, tested, and — for Windows and
+Linux — GUI field-tested on real hardware with real data. The Windows field test surfaced and
+fixed a critical latent cross-platform bug (multi-chunk embed overflow, PR #10 + bug report).
+Delivered as a stacked PR chain #2→#3→#4→#6→#7→#10 plus independent fixes #5/#8/#9, all draft,
+awaiting Bo's review. Flips to Complete when the stack merges (one post-merge chore: re-run
+the Windows suite after #5 lands).
 **Owner:** Bo Motlagh
 
 ## Goal
@@ -121,6 +127,49 @@ perfectly (strictly safer than pinning the old 1.23 official binary, which would
 newer-headers/older-runtime mismatch). The artifact is hosted in this repo's GitHub releases and
 pinned by SHA-256 in `assets/manifest.json` like every other artifact — `make assets` treats it
 identically to officially-published binaries.
+
+## Phase 0 Results
+
+**Date:** 2026-07-06 · **Outcome: GATE PASSED** — local embedding stack proven end-to-end on
+macOS arm64 (throwaway spike, scratchpad only; no repo code touched).
+
+**Verified stack (all pinned versions worked):** ONNX Runtime 1.26.0 CPU via `onnxruntime_go`
+v1.31.0; tokenizer via `daulet/tokenizers` v1.27.0 (prebuilt `libtokenizers.darwin-arm64`);
+models `Xenova/multilingual-e5-small` int8 (118 MB) and
+`ibm-granite/granite-embedding-97m-multilingual-r2` int8 (98 MB). Pipeline
+tokenizer → ORT → mean-pool → L2-normalize produced a valid **384-dim, L2-norm = 1.0** vector;
+multilingual tokenization (EN/ES/ZH/AR) sane.
+
+| Metric | mE5-small | Granite-97m |
+|---|---|---|
+| Cold load | 129 ms | 145 ms |
+| Per-chunk @ batch 16 (~300 tok) | ~34 ms (~30/s) | ~32 ms |
+| Peak RSS (upper bound) | ~1.3 GB | ~1.5 GB |
+| Disk | 118 MB | 98 MB |
+
+**Quality (cosine; distance = 1 − cos):** ordering correct — related 0.13–0.18 <
+cross-lingual 0.17–0.22 < unrelated ~0.29 (mE5). Cross-lingual (EN↔ES) retrieval works well.
+
+**Model decision:** **`multilingual-e5-small` is the committed default.** **Granite-97m logged as
+a future upgrade candidate** — it loaded and ran at full speed on arm64 (the AVX2-int8 concern did
+not materialize), smaller file, crisper related/unrelated separation, but marginally weaker
+cross-lingual; needs a broader recall eval + prefix-convention decision before promotion. Upside,
+not a dependency (model = data file).
+
+**Findings that adjust the plan:**
+
+1. **mE5 requires `token_type_ids`.** The Xenova export takes **three** INT64 inputs
+   (`input_ids`, `attention_mask`, `token_type_ids`), not two — pass a zero tensor for
+   `token_type_ids` or ORT errors. Affects the Phase 2 `LocalEmbedder` inference code. (Granite
+   takes the two-input form.)
+2. **Default search threshold `1.5` is miscalibrated for local vectors** (real related-vs-unrelated
+   separation is ~0.25 cosine distance; 1.5 admits nearly everything). Make the default
+   **provider-aware**, and confirm which distance metric sqlite-vec's `vec0` table is configured for
+   before tuning.
+3. **Peak RSS ~1 GB** (ORT memory arena + batch activations) — constrain ORT arena / batch size in
+   `LocalEmbedder` for the desktop memory budget.
+4. **Build flags:** minimal `CGO_LDFLAGS="-L<dir> -ltokenizers"` suffices on darwin arm64; no
+   `-framework` flags needed (the lib embeds `-ldl -lm`).
 
 ## Architecture
 
@@ -297,17 +346,35 @@ and the indexing-progress UX all already exist and are the extension points.
 
 | File | Purpose |
 |---|---|
-| `internal/embeddings/local/local.go` | `LocalEmbedder` (lazy ONNX session, tokenize→infer→pool→normalize, prefixes) |
-| `internal/embeddings/local/assets.go` | `go:embed` + extract-to-`~/.agent-memory/runtime/` with checksums |
-| `internal/embeddings/local/local_test.go` | Unit tests + build-tagged integration test |
-| `internal/chunker/hf_tokenizer.go` (or similar) | HF tokenizer adapter satisfying `chunker.Tokenizer` |
-| `assets/manifest.json` | Pinned artifact URLs + SHA-256 (in git) |
+| `internal/embeddings/local/local.go` | `LocalEmbedder` (implements `Embedder`): prefixes, sub-batching, tensor assembly (incl. zero `token_type_ids`), mean-pool, L2-normalize, lazy-session orchestration. **Pure Go, no build tag** — unit-tested via fake session/tokenizer seams. |
+| `internal/embeddings/local/session_ort.go` | **(`//go:build localembed`)** real ONNX Runtime session via `onnxruntime_go` (thread cap + arena limit). |
+| `internal/embeddings/local/tokenizer_hf.go` | **(`//go:build localembed`)** HF tokenizer via `daulet/tokenizers` + the `chunker.Tokenizer` adapter. **Relocated here from `internal/chunker/` (Phase 2 decision — see below)** to keep the pure-Go `chunker` package CGo-free. |
+| `internal/embeddings/local/assets.go` | asset resolution + checksummed atomic extraction to `~/.agent-memory/runtime/<fingerprint>/`. Source = dev env path (`AGENT_MEMORY_LOCAL_ASSETS`) in Phase 2; swapped to `go:embed` in Phase 3. |
+| `internal/embeddings/local/local_test.go` | unit tests (fake session+tokenizer, no tag, always run) + `//go:build localembed` integration test. |
+| `assets/manifest.json` | Pinned artifact URLs + SHA-256 (in git) — populated in Phase 3. |
+
+**Phase 2 implementation decisions (recorded 2026-07-07, per the "update the tables, don't silently diverge" rule):**
+
+1. **CGo isolation via a `//go:build localembed` tag + interface seams.** The ONNX/tokenizer
+   infrastructure (which requires native libs) lives in tagged files behind `onnxSession` /
+   `tokenizer` interfaces; the pure pipeline logic and unit tests carry no tag. This keeps the
+   default `go build ./...` / `go test ./...` (and CI) green and native-lib-free through Phase 2;
+   `make build` gains the tag + `CGO_LDFLAGS` in Phase 3. Reinforces the architecture rules
+   (interfaces at boundaries, mocks for all seams).
+2. **HF tokenizer adapter moved from `internal/chunker/` to `internal/embeddings/local/`.** Placing
+   the CGo-dependent adapter in the `chunker` package would force that pure-Go domain package (and
+   its always-run tests) to require the native tokenizer lib. `main.go` injects it via the
+   `chunker.WithTokenizer` seam. Better honors separation of concerns than the original placement.
+3. **Phase 2 sources assets from a dev path** (env var), not `go:embed`; weights/libs are never
+   committed. `go:embed` + `make assets` + manifest land in Phase 3.
 
 ### Explicitly unchanged
 
 `internal/watcher/`, `internal/extractor/`, `internal/mcp/dispatch.go`, `internal/mcp/stdio.go`
-(interface types unchanged — `ReadOnlyEngineService` signature is stable), `tray.go`,
+(interface types unchanged — `ReadOnlyEngineService` signature is stable),
 `internal/store/sqlite_readonly.go`, all search/KNN logic in `store.Search`.
+(~~`tray.go`~~ — removed from this list in Phase 5: it required a `//go:build darwin` guard
++ non-darwin stub to compile anywhere but macOS; see Phase 5 Linux findings.)
 
 ### Known dead-code risks to check at the end
 
@@ -367,6 +434,94 @@ and the indexing-progress UX all already exist and are the extension points.
 
 ### Phase 5 — Cross-platform builds
 
+**Execution decisions (recorded 2026-07-16, per the "update the tables, don't silently diverge" rule):**
+
+- **Delivered as small stacked PRs** (Bo's small-PRs rule; the epic doesn't mandate one PR):
+  foundation → Linux → macOS x86_64 → Windows. Windows moved last purely for convenience
+  (only target needing a second machine for the Rust tokenizer build); no dependency reason.
+- **Foundation PR (`feat/xplat-foundation`)** implements Open Concern #8: the ORT shared
+  library's `go:embed` moves from `assets_embed.go` into per-platform
+  `assets_embed_<GOOS>_<GOARCH>.go` files (each defines `embeddedORTLib` + `ortLibFile`;
+  darwin-arm64 first). Model + tokenizer stay in the shared embed (platform-independent
+  bytes). Each later platform PR adds one sibling file + manifest entries only.
+- **Makefile checksum portability**: `shasum -a 256` (macOS-only) replaced by a `SHA256`
+  variable that picks `sha256sum` on Linux — prerequisite for `make assets` inside Docker/CI.
+- `dylibCandidates` gains the versioned Linux name (`libonnxruntime.so.1.26.0`) that the
+  official Linux tarball actually ships.
+
+**Linux findings (recorded 2026-07-16, branch `feat/xplat-linux`):**
+
+- **`tray.go` was never darwin-guarded** — its Cocoa CGo preamble compiled on every platform,
+  making *any* non-macOS build impossible. Fixed here (`//go:build darwin` + no-op
+  `tray_stub.go`); this removes tray.go from the "Explicitly unchanged" list (deviation
+  recorded per the rules — CLAUDE.md already declared it macOS-only in intent).
+- **Pre-existing watcher bug surfaced by first-ever Linux test run:** inotify emits
+  CREATE+WRITE for a new file; the per-path debouncer replaces rather than merges events, so
+  OnCreate is swallowed (OnModify fires instead — no user impact today since both index the
+  file). Documented in `Documentation/Bugs/fswatcher-create-event-swallowed-linux.md`;
+  fix deliberately kept out of this epic's PRs (watcher is out of scope).
+- **linux-arm64 verified end-to-end** in Docker (golang:1.26-bookworm): `make assets`
+  checksums, test suite (watcher known-fail excepted), real int8 inference (cosine ordering
+  0.140 < 0.171 < 0.286, matching Phase 0), full Wails build (webkit2gtk-4.1 via the
+  `webkit2_41` tag), and an offline (`--network none`) MCP search that retrieved correct
+  semantic matches from a macOS-indexed DB — cross-platform vector compatibility confirmed.
+- **linux-amd64**: artifacts pinned and checksum-verified; runtime smoke still pending
+  (needs an x64 Linux env — Docker on the arm64 dev Mac would run it under slow emulation).
+
+**macOS x86_64 findings (recorded 2026-07-17, branch `feat/xplat-macos-intel`):**
+
+- **ORT 1.26.0 source-built for mac-Intel** exactly as planned (official prebuilts stopped at
+  1.23): cross-compiled from the arm64 dev Mac (`./build.sh --config Release --osx_arch x86_64
+  --build_shared_lib --skip_tests`; needs CMake ≥4 ok, Python ≥3.10 — system 3.9 fails on
+  `match` syntax). 27.5 MB dylib, published as repo release **`ort-1.26.0-darwin-x64`**
+  (prerelease, reproducible recipe in its notes), pinned in the manifest like every artifact.
+- **Darwin embed file consolidated**: `assets_embed_darwin_arm64.go` →
+  `assets_embed_darwin.go` (`localembed && darwin`) — both mac arches share the dylib file
+  name, mirroring the Linux single-file pattern; the arch difference is which artifact
+  `make assets` fetches.
+- **New `make build-darwin-amd64`** target cross-builds the Intel app from an arm64 Mac
+  (GOARCH=amd64 assets fetch + `wails build -platform darwin/amd64`).
+- **Arch-collision bug found and fixed before ship:** the runtime extraction dir
+  (`~/.agent-memory/runtime/<fingerprint>/`) was not arch-namespaced, so an Intel build (or a
+  home dir migrated from an Intel Mac) poisoned the arm64 build's dlopen with an
+  incompatible-architecture dylib. Extraction dirs are now `<GOOS>-<GOARCH>-<fingerprint>`.
+  No user impact (the extraction scheme never shipped — it exists only in this PR stack).
+- **Verified under Rosetta 2 on the arm64 dev Mac:** integration test passes as an x86_64
+  binary (cosine ordering 0.140 < 0.171 < 0.288, matching all other platforms);
+  `GOARCH=amd64 make assets` downloads + checksum-verifies from the repo release; full
+  x86_64 Wails app builds, extracts its assets to its own arch dir, and answers an MCP
+  search correctly with both arch dirs coexisting. Native arm64 re-verified after.
+
+**Windows x64 findings (recorded 2026-07-17, branch `feat/xplat-windows`):**
+
+- **Built on-device over SSH** (Tailscale) to the Windows PC, driven from the dev Mac.
+  Toolchain installed via scoop: Go 1.26.5, MinGW gcc 16.1.0, rustup-gnu + cargo 1.97.1,
+  make. Recipe + provenance in `Documentation/windows-build.md`.
+- **libtokenizers.a source-built** (no upstream Windows prebuilt): `daulet/tokenizers` v1.27.0
+  tag, **GNU** Rust toolchain (must match MinGW gcc; MSVC would produce an unlinkable `.lib`).
+  The v1.27.0 layout emits `libtokenizers_ffi.a` — renamed to `libtokenizers.a` on packaging.
+  Published as repo release **`tokenizers-1.27.0-windows-x64`**, SHA-256 pinned. ONNX Runtime
+  DLL is the **official** Microsoft `onnxruntime-win-x64-1.26.0.zip` (member-pinned).
+- **`assets_embed_windows.go`** embeds `onnxruntime.dll`; **Makefile** learned to extract
+  `.zip` archives (unzip → Windows `tar.exe` fallback) so `make assets` runs on Windows.
+- **Two Windows-only build gaps found and fixed in the Makefile** (both invisible on
+  macOS/Linux, guarded by `GOOS=windows`):
+  1. The Rust static lib needs NT/Winsock/crypto syscall libs MinGW doesn't link by default
+     (`undefined reference to Nt*/Rtl*`) → `LINK_LIBS` appends `-lntdll -lws2_32 -lbcrypt
+     -luserenv -ladvapi32 -lkernel32 -lncrypt`.
+  2. sqlite-vec's cgo `#include "sqlite3.h"` has no system header on Windows (macOS SDK /
+     Linux libsqlite3 supplied it) → new `winhdr` step stages the headers mattn/go-sqlite3
+     bundles (its `sqlite3-binding.h` IS the amalgamation `sqlite3.h`) into `build/winhdr`,
+     version-matched to the SQLite mattn compiles in.
+- **Verified natively on Windows x64:** `make assets` downloads + checksum-verifies all four
+  artifacts (incl. `.zip` extraction and our published tokenizer release); integration test
+  links and passes (cosine ordering 0.140 < 0.171 < 0.286, matching every platform); full
+  `make build` produces `agent-memory.exe` (193 MB PE32+ GUI); the exe extracts its embedded
+  assets to `windows-amd64-<fingerprint>/` and answers an MCP search on a Mac-indexed DB
+  ("how do I cook italian pasta" → carbonara-recipe.md) — cross-platform vector compatibility
+  confirmed. (Network not forcibly disabled — SSH session — but the local provider makes no
+  outbound calls by design; the `--network none` Linux/Intel runs already proved that property.)
+
 1. Linux x64/arm64: assets manifest entries, CI build, smoke test.
 2. Windows x64: CI job builds `libtokenizers.a` with Rust toolchain (no published binary);
    ORT DLL from official release; smoke test.
@@ -383,7 +538,135 @@ and the indexing-progress UX all already exist and are the extension points.
 2. Architecture rule check per `Documentation/ARCHITECTURE.md` (inward deps, wiring in main.go,
    mocks for all interfaces, thin delivery layer).
 3. `go vet ./...`, `go test ./...`, `make build`, full manual test both modes.
-4. Update this epic's Status to Complete; record the chosen default model and measured numbers.
+4. **Verification gaps carried from Phase 5** (recorded 2026-07-17 — coverage gaps, not known
+   defects; each Phase 5 platform's core inference + search path IS verified):
+   - [x] **Windows GUI smoke** — DONE 2026-07-17/18, and it earned its keep: the field test
+     (keyless onboarding ✓, real 109-file vault indexed, dossier search via Claude Desktop
+     returning correct contextual results ✓) surfaced **three real bugs**, all fixed:
+     1. **Token-budget overflow** — every multi-chunk file (>~1.7 KB) silently failed to
+        embed on EVERY platform, latent since Phase 3 (all prior verifications used tiny
+        single-chunk corpora). Fixed + permanent large-doc integration test: **PR #10**;
+        report `Documentation/Bugs/local-embed-token-budget-overflow.md`. Field-verified:
+        105 files / 932 chunks / 79 multi-chunk / 0 errors (was 26/26/0).
+     2. **Index failures invisible** (stderr only, nothing in the Log page): **PR #8**.
+     3. **Close-window zombies on Windows** (HideWindowOnClose without the mac-only tray;
+        six concurrent instances accumulated): **PR #9**.
+     Observations for Bo (not fixed): onboarding registers the folder but indexing starts
+     only via the Dashboard button (intentional per app.go comment — confirm UX intent);
+     Microsoft-Store-installed Claude Desktop reads its config from the MSIX sandbox
+     (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`), so the Install button
+     can't reach it — documented limitation, needs a decision on Store-install detection.
+   - [x] **Linux GUI field test** — DONE 2026-07-20 (Surface, Pop!_OS 24.04, fix #10 build):
+     first-ever Linux GUI run — keyless onboarding ✓, indexed 4 large docs (76 chunks, all
+     multi-chunk, 0 errors) ✓, MCP semantic search correct ✓. Throughput ~4 chunks/s on the
+     older dual-core i7 (vs ~30/s on the M-series dev Mac) — expected CPU scaling, no
+     pathology. **Packaging lesson:** mid-test the machine upgraded 22.04→24.04, which
+     REMOVES webkit2gtk-4.0 — the 4.0-linked binary stopped loading. Linux release builds
+     must target **webkit2gtk-4.1** (`-tags webkit2_41`; present on 22.04 AND 24.04; the
+     linux-arm64 build already does — only the ad-hoc x64 test build used 4.0).
+   - [x] **Full untagged `go test ./...` on Windows** — DONE 2026-07-17: every package green
+     except `TestOnCreate`, which fails exactly as on Linux (assumption CONFIRMED — Windows
+     delivers the same create+write double-event). PR #5's fix branch verified on Windows:
+     watcher suite 3/3 pass. So the sole Windows failure is the known bug with a proven fix;
+     re-run once #5 merges into the stack for the final green checkmark.
+   - [x] **linux-amd64 runtime smoke** — DONE 2026-07-17 on real x64 hardware (Surface Book
+     i7, Pop!_OS 22.04): binary built in an Ubuntu 22.04 amd64 container (glibc-matched;
+     `go build` with wails production tags — the full wails-CLI build path was already proven
+     on linux-arm64), integration test passed in-container (0.140 < 0.171 < 0.286), then the
+     binary ran natively on the Surface with **zero library installs** (`ldd` clean against
+     stock webkit2gtk-4.0/gtk-3), extracted assets to `linux-amd64-<fingerprint>/`, and
+     answered the MCP search correctly against a macOS-indexed DB.
+5. Update this epic's Status to Complete; record the chosen default model and measured numbers.
+
+**Review revision round (2026-08-12, addressing Bo's PR #2 review):** the shipped
+dimension-only read-only guard was an unrecorded simplification of this epic's specified
+`embedding_fingerprint` — now resolved per the review: the engine records the full
+`provider:model:dimensions` fingerprint on every index run/reset (bare dimension kept for
+pre-fingerprint DBs), and the read-only guard compares fingerprints first, so a
+same-dimension model swap (e.g. granite-97m, also 384-dim) is caught instead of silently
+returning mixed-vector garbage. Also landed in the round: crash-safe shutdown (atomic
+per-file index transaction + Stop-waits-for-file-boundary), activity-log retention
+(30-day TTL / 5000-row cap) with per-path error upsert (no more identical rows per
+launch), error logging consolidated inside IndexFile, deterministic cross-platform
+debounce-merge tests, and `[]` (not `null`) for empty search results.
+
+**Phase 6 executed 2026-07-20 — results:**
+
+- **Orphan hunt: clean.** Zero callers of the old `Embed()` name anywhere. Every
+  `"text-embedding-3-small"` / `1536` occurrence lives in a legitimate OpenAI-path site
+  (defaults.go, openai.go, OpenAI UI pickers, tests asserting OpenAI resolution). One
+  deliberate fallback kept: `store.defaultVecDimension = 1536` (dim ≤ 0 fallback, documented
+  as historical-schema preservation; the single production caller always passes the resolved
+  dimension). Fixed one stale comment (domain.SearchOptions.Threshold now points at the
+  provider-aware `embeddings.DefaultThreshold`: openai 1.5 / local 0.6).
+- **Architecture audit: passes.** Inward-only imports verified package-by-package
+  (store→domain only — never imports embeddings; embeddings/chunker/watcher/extractor
+  import no siblings; engine depends on interfaces of all domains; mcp defines its own
+  service interfaces and imports only domain). All wiring in main.go. All six domain
+  interfaces have mocks (`chunker.Tokenizer`, a two-method seam, uses package-local fakes
+  in its consumers — acceptable). Delivery layer thin (app.go pass-through + the sanctioned
+  provider-swap flow).
+- **Formal pass: green.** `go vet` clean; untagged suite 8/8 packages; tagged integration
+  suite (incl. the large-document regression) passes; `make build` (arm64, fix included);
+  stdio mode answers a semantic search correctly with the fixed binary; GUI mode
+  Phase-4-verified and field-verified on Windows + Linux with the fix.
+- **Post-review items only:** re-run the Windows suite once PR #5 merges (expect all-green);
+  flip Status from "Complete pending review" to "Complete" when the PR stack lands.
+
+**Final measured numbers (recorded per this checklist):** default model
+`multilingual-e5-small` int8 (384-dim, 512-token ctx, effective chunk budget 480);
+cosine-distance ordering related ≈0.13–0.14 < cross-lingual ≈0.17 < unrelated ≈0.28–0.29,
+reproduced identically on macOS arm64, macOS x86_64 (Rosetta), Linux arm64/x64, Windows x64;
+throughput ~30 chunks/s (M-series) to ~4 chunks/s (2016 dual-core i7); field scale:
+105 files / 932 chunks real vault on Windows, offline, zero errors.
+
+## Phase 3 — Detailed Plan (DRAFT, pending Bo review)
+
+Drafted 2026-07-07 as the method-level plan for the Phase 3 outline above. **Not yet built** —
+Phase 3 is the biggest, behavior-changing phase and its architecture decisions want Bo's sign-off
+first. **Recommend delivering as 3 smaller PRs** (3a build/bundling → 3b config/switching → 3c
+safety) to fit the "small PRs, never break anything" model.
+
+### 3a — Build & distribution (no running-app behavior change yet)
+
+| File | Change |
+|---|---|
+| `Makefile` | New `assets` target: download pinned model/tokenizer/ORT-lib into `assets/embedded/` (gitignored), verify SHA-256 vs `assets/manifest.json`. `build` depends on `assets`; passes `-tags localembed` + `CGO_LDFLAGS` for `libtokenizers.a`. |
+| `assets/manifest.json` (new) | Pinned URLs + SHA-256 (in git). |
+| `.gitignore` | `assets/embedded/`. |
+| `internal/embeddings/local/assets_embed.go` (new, `//go:build localembed`) | `go:embed` model+tokenizer+dylib; extract via existing `extractAndVerify` to `~/.agent-memory/runtime/<fingerprint>/`; `resolveAssets` falls back to this when no dev dir/env is set. |
+| `internal/embeddings/local/assets_embed_stub.go` (new, `//go:build !localembed`) | "no embedded assets" → keeps default build small/green. |
+
+**Verify:** `make assets && make build` runs the local model offline; plain `go test ./...` stays green/lib-free.
+
+### 3b — Config, factory & provider switching (local becomes default)
+
+| File | Change (method-level) |
+|---|---|
+| `app.go` | `EmbedderFactory` → `func(provider, apiKey, model) (embeddings.Embedder, error)`. `SetConfig` gains `embedding_provider` case: swap embedder **and chunker** → `engine.Reset()`. Provider-aware `embedding_model`/`openai_api_key` handling. |
+| `internal/engine/engine.go` | **Add `SetChunker(c chunker.Chunker)`** (Open Concern #1) — provider switch swaps tokenizer/chunker atomically with the embedder. |
+| `main.go` | Both branches read `embedding_provider`, build via factory (`local`→`local.New`, `openai`→`NewOpenAIEmbedder`); GUI wires embedder-matched tokenizer into chunker (`WithTokenizer` + `WithMaxInputTokens`); **stdio stays lazy**. |
+| `internal/embeddings/defaults.go` (new) | Centralize `defaultModel(provider)` / `defaultDimension(provider, model)` (Open Concern #4) — remove scattered `"text-embedding-3-small"`/`1536` hardcodes. |
+
+**Verify:** fresh DB indexes a test folder fully offline; provider switch local↔openai triggers reset + re-index.
+
+### 3c — Safety, store & Stats
+
+| File | Change |
+|---|---|
+| `internal/store/sqlite.go` | `migrate()`/`Reset()` create `chunk_embeddings` at the active provider's dimension (passed in — see Decision 2), not hardcoded. `Stats()` reports `embedding_provider`+`embedding_model` from config (layering fix). |
+| `app.go` | Write `embedding_fingerprint` (`provider:model:dim`) on each index run; check at GUI startup → mismatch surfaces "re-index required", not garbage. |
+| `internal/engine/readonly.go` | Read-only dimension guard (Open Concern #2): compare embedder `Dimensions()`/fingerprint to stored table; mismatch → actionable error, not raw sqlite-vec failure. |
+| `internal/mcp/server.go` | `index_status` gains a `provider` field (from `Stats`). |
+| threshold | Confirm sqlite-vec metric; provider-aware default threshold from Phase 0 numbers (~0.25 local), centralized (Open Concern #5). |
+
+**Verify:** existing OpenAI-vectored DB hits the fingerprint-mismatch path (not garbage); `--mcp` returns a clear error on dimension mismatch.
+
+### Decisions needing Bo's sign-off
+
+1. **`make build` now requires native libs + `-tags localembed`** (via `make assets`, ~150 MB); binary ~26 MB → ~180 MB. Epic accepts this — confirm.
+2. **Store dimension: reorder the composition root** so `main.go` resolves provider/model/dimension up front and **passes the dimension into the store**, rather than `migrate()` hardcoding it — avoids a new hardcode *and* keeps `store` from importing `embeddings`. Touches wiring order.
+3. **Existing-user handling:** when `embedding_provider` is unset on an upgraded DB with OpenAI vectors + a key → default to **openai** (preserve their setup), not local. Full onboarding migration is Phase 4; the resolution rule starts here.
 
 ## Risks
 
@@ -398,6 +681,23 @@ and the indexing-progress UX all already exist and are the extension points.
 | Prefixes leaking into stored content | Medium | Prefix strictly inside `LocalEmbedder`; test asserts stored chunks are prefix-free |
 | Binary size ~180 MB | Accepted | Decision made 2026-07-02; the trade for zero API cost |
 | int8 quantization quality drop vs fp32 | Low | Phase 0 sanity comparison; fp32 fallback possible at 449 MB if unacceptable |
+
+## Open Concerns & Plan Adjustments (from review + Phase 0)
+
+Captured 2026-07-06 during pre-implementation review and the Phase 0 spike. Each item is tagged to
+the phase that must address it, so nothing is lost mid-epic.
+
+| # | Concern | Fix in | Note |
+|---|---|---|---|
+| 1 | **Chunker not swapped on runtime provider switch.** `engine` has `SetEmbedder` but no `SetChunker`; `app.SetConfig` swaps only the embedder — switching OpenAI↔local at runtime would leave the wrong tokenizer/clamp. | **Phase 3** | Add `engine.SetChunker` (or a combined provider swap); `SetConfig` provider case swaps embedder + chunker atomically. |
+| 2 | **Read-only stdio dimension mismatch unhandled.** `readonly.Search` embeds the query with a config-derived embedder; if its dim disagrees with the stored vectors, sqlite-vec errors and the read-only process cannot re-index. | **Phase 3** | stdio compares embedder `Dimensions()`/fingerprint to the stored table; return an actionable error ("rebuild in the GUI"), not a raw failure. |
+| 3 | **Existing-user onboarding regression.** Switching the gate to `onboarding_complete` re-onboards current users and defaults them to local, mismatching their OpenAI vectors. | **Phase 4** | Migration: if the DB has watched dirs or a saved key, back-fill `onboarding_complete=true` and preserve `provider=openai` for existing OpenAI DBs. |
+| 4 | **Scattered default-model/dimension hardcodes** (`"text-embedding-3-small"` ×5, `1536` ×2). | **Phase 3** (seed in Phase 1) | Centralize `defaultModel(provider)` / `defaultDimension(provider,model)`; stop trading a `1536`→`384` hardcode. |
+| 5 | **Threshold `1.5` duplicated (~4 sites) and miscalibrated** for local (Phase 0: real separation ~0.25 cosine distance). | **Phase 3** | Centralize the default; make it provider-aware; confirm sqlite-vec's configured distance metric. |
+| 6 | **mE5 needs `token_type_ids`** (3 INT64 inputs, not 2). | **Phase 2** | Pass a zero tensor in `LocalEmbedder`. |
+| 7 | **Peak RSS ~1 GB** (ORT arena + batch activations). | **Phase 2** | Constrain ORT arena / batch size. |
+| 8 | **`go:embed` must be build-tagged per platform** (one binary can embed only one platform's ORT lib). | **Phase 5** | Build constraints on the embed directives. |
+| 9 | **`OpenAIEmbedder.MaxInputTokens()==0` ("no limit")** — footgun if `chunk_size` ever exceeds OpenAI's 8191. | Low priority | Documented trade-off; add a comment. |
 
 ## Out of Scope (this epic)
 

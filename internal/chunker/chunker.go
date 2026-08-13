@@ -12,11 +12,38 @@ const DefaultChunkSize = 512
 // DefaultChunkOverlap is the default number of overlapping tokens between consecutive chunks.
 const DefaultChunkOverlap = 50
 
+// tiktokenAdapter wraps a tokenizer.Codec to satisfy the Tokenizer interface,
+// converting between the codec's []uint tokens and the interface's []uint32.
+type tiktokenAdapter struct {
+	codec tokenizer.Codec
+}
+
+func (a tiktokenAdapter) Encode(text string) ([]uint32, error) {
+	ids, _, err := a.codec.Encode(text)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]uint32, len(ids))
+	for i, id := range ids {
+		out[i] = uint32(id)
+	}
+	return out, nil
+}
+
+func (a tiktokenAdapter) Decode(tokens []uint32) (string, error) {
+	ids := make([]uint, len(tokens))
+	for i, t := range tokens {
+		ids[i] = uint(t)
+	}
+	return a.codec.Decode(ids)
+}
+
 // TokenChunker implements the Chunker interface using tiktoken-based token counting.
 type TokenChunker struct {
 	chunkSize int
 	overlap   int
-	codec     tokenizer.Codec
+	tokenizer Tokenizer
+	maxTokens int
 }
 
 // Option configures a TokenChunker.
@@ -40,6 +67,25 @@ func WithOverlap(overlap int) Option {
 	}
 }
 
+// WithTokenizer sets a custom tokenizer, overriding the default tiktoken codec.
+func WithTokenizer(t Tokenizer) Option {
+	return func(c *TokenChunker) {
+		if t != nil {
+			c.tokenizer = t
+		}
+	}
+}
+
+// WithMaxInputTokens clamps the effective chunk size so no chunk exceeds the
+// tokenizer/model's maximum input length. A value of 0 disables clamping.
+func WithMaxInputTokens(n int) Option {
+	return func(c *TokenChunker) {
+		if n > 0 {
+			c.maxTokens = n
+		}
+	}
+}
+
 // New creates a new TokenChunker with the given options.
 // It uses the cl100k_base encoding for token counting.
 func New(opts ...Option) (*TokenChunker, error) {
@@ -51,7 +97,7 @@ func New(opts ...Option) (*TokenChunker, error) {
 	c := &TokenChunker{
 		chunkSize: DefaultChunkSize,
 		overlap:   DefaultChunkOverlap,
-		codec:     codec,
+		tokenizer: tiktokenAdapter{codec: codec},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -67,7 +113,7 @@ func (c *TokenChunker) ChunkText(content string) ([]ChunkResult, error) {
 		return nil, nil
 	}
 
-	tokens, _, err := c.codec.Encode(content)
+	tokens, err := c.tokenizer.Encode(content)
 	if err != nil {
 		return nil, err
 	}
@@ -77,18 +123,25 @@ func (c *TokenChunker) ChunkText(content string) ([]ChunkResult, error) {
 		return nil, nil
 	}
 
+	// Effective chunk size: clamp to maxTokens when it is smaller than the
+	// configured chunk size. With the default (maxTokens==0) this is a no-op.
+	size := c.chunkSize
+	if c.maxTokens > 0 && c.maxTokens < size {
+		size = c.maxTokens
+	}
+
 	var results []ChunkResult
 	idx := 0
 	start := 0
 
 	for start < totalTokens {
-		end := start + c.chunkSize
+		end := start + size
 		if end > totalTokens {
 			end = totalTokens
 		}
 
 		chunkTokens := tokens[start:end]
-		chunkText, err := c.codec.Decode(chunkTokens)
+		chunkText, err := c.tokenizer.Decode(chunkTokens)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +154,7 @@ func (c *TokenChunker) ChunkText(content string) ([]ChunkResult, error) {
 
 		idx++
 
-		step := c.chunkSize - c.overlap
+		step := size - c.overlap
 		if step < 1 {
 			step = 1
 		}

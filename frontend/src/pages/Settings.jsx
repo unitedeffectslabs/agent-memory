@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react'
 const MODELS = ['text-embedding-3-small', 'text-embedding-3-large']
 
 export default function Settings() {
+  const [provider, setProvider] = useState('local')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
   const [chunkSize, setChunkSize] = useState('')
@@ -14,12 +15,14 @@ export default function Settings() {
   const [error, setError] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [pendingModel, setPendingModel] = useState(null) // model change awaiting confirmation
+  const [pendingProvider, setPendingProvider] = useState(null) // provider change awaiting confirmation
 
   useEffect(() => { loadSettings() }, [])
 
   async function loadSettings() {
     try {
-      const [key, m, cs, co, p, token] = await Promise.all([
+      const [prov, key, m, cs, co, p, token] = await Promise.all([
+        window.go.main.App.GetConfig('embedding_provider'),
         window.go.main.App.GetConfig('openai_api_key'),
         window.go.main.App.GetConfig('embedding_model'),
         window.go.main.App.GetConfig('chunk_size'),
@@ -27,6 +30,7 @@ export default function Settings() {
         window.go.main.App.GetConfig('mcp_port'),
         window.go.main.App.GetConfig('auth_token'),
       ])
+      setProvider(prov || 'local')
       setApiKey(key || '')
       setModel(m || 'text-embedding-3-small')
       setChunkSize(cs || '512')
@@ -38,6 +42,27 @@ export default function Settings() {
     } catch {
       // Backend may not be ready
     }
+  }
+
+  // Provider change is destructive when there are existing embeddings (the
+  // backend clears + re-indexes because vectors across providers/dimensions are
+  // incompatible), so gate it behind a confirmation when chunks already exist.
+  async function requestProviderChange(next) {
+    if (next === provider) return
+    setError('')
+    try {
+      const stats = await window.go.main.App.GetStats()
+      if (stats.TotalChunks > 0) {
+        setPendingProvider(next)
+        return
+      }
+    } catch { /* proceed anyway */ }
+    applyProviderChange(next)
+  }
+
+  function applyProviderChange(next) {
+    setProvider(next)
+    saveConfig('embedding_provider', next, 'provider')
   }
 
   async function saveConfig(key, value, label) {
@@ -91,41 +116,63 @@ export default function Settings() {
 
       {error && <div style={s.error}>{error}</div>}
 
-      {/* API Configuration */}
-      <Section title="API Configuration">
-        <Row label="OpenAI API Key">
-          <input
-            type="password"
-            style={s.input}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-..."
-          />
-          <SaveBtn onClick={() => saveConfig('openai_api_key', apiKey, 'apiKey')} saved={saved.apiKey} />
+      {/* Embedding Provider */}
+      <Section title="Embedding Provider">
+        <Row label="Provider">
+          <div style={s.providerChoices}>
+            <ProviderOption
+              selected={provider === 'local'}
+              onClick={() => requestProviderChange('local')}
+              title="Local (default)"
+              desc="Private, on-device, no API key"
+            />
+            <ProviderOption
+              selected={provider === 'openai'}
+              onClick={() => requestProviderChange('openai')}
+              title="OpenAI"
+              desc="Higher quality, requires a key and sends text to OpenAI"
+            />
+          </div>
+          {saved.provider && <span style={s.saved}>Saved</span>}
         </Row>
-        <Row label="Embedding Model">
-          <select
-            style={s.select}
-            value={model}
-            onChange={async (e) => {
-              const newModel = e.target.value
-              if (newModel === model) return
-              // Check if there are existing embeddings that would be wiped
-              try {
-                const stats = await window.go.main.App.GetStats()
-                if (stats.TotalChunks > 0) {
-                  setPendingModel(newModel) // show confirmation dialog
-                  return
-                }
-              } catch { /* proceed anyway */ }
-              setModel(newModel)
-              saveConfig('embedding_model', newModel, 'model')
-            }}
-          >
-            {MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-          {saved.model && <span style={s.saved}>Saved</span>}
-        </Row>
+
+        {provider === 'openai' && (
+          <>
+            <Row label="OpenAI API Key">
+              <input
+                type="password"
+                style={s.input}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-..."
+              />
+              <SaveBtn onClick={() => saveConfig('openai_api_key', apiKey, 'apiKey')} saved={saved.apiKey} />
+            </Row>
+            <Row label="Embedding Model">
+              <select
+                style={s.select}
+                value={model}
+                onChange={async (e) => {
+                  const newModel = e.target.value
+                  if (newModel === model) return
+                  // Check if there are existing embeddings that would be wiped
+                  try {
+                    const stats = await window.go.main.App.GetStats()
+                    if (stats.TotalChunks > 0) {
+                      setPendingModel(newModel) // show confirmation dialog
+                      return
+                    }
+                  } catch { /* proceed anyway */ }
+                  setModel(newModel)
+                  saveConfig('embedding_model', newModel, 'model')
+                }}
+              >
+                {MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              {saved.model && <span style={s.saved}>Saved</span>}
+            </Row>
+          </>
+        )}
       </Section>
 
       {/* Chunking */}
@@ -177,7 +224,9 @@ export default function Settings() {
           <span style={s.readOnly}>127.0.0.1:{port || '9847'}</span>
         </Row>
         <Row label="Outbound">
-          <span style={s.readOnly}>api.openai.com only</span>
+          <span style={s.readOnly}>
+            {provider === 'openai' ? 'api.openai.com' : 'none (fully offline)'}
+          </span>
         </Row>
       </Section>
 
@@ -219,6 +268,33 @@ export default function Settings() {
                   setPendingModel(null)
                   setModel(newModel)
                   saveConfig('embedding_model', newModel, 'model')
+                }}
+              >
+                Change &amp; Reset Index
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Provider change confirmation dialog */}
+      {pendingProvider && (
+        <div style={s.overlay} onClick={() => setPendingProvider(null)}>
+          <div style={s.dialog} onClick={(e) => e.stopPropagation()}>
+            <div style={s.dialogTitle}>Change Embedding Provider?</div>
+            <div style={s.dialogText}>
+              Switching from <strong>{provider}</strong> to <strong>{pendingProvider}</strong> will
+              reset the index and re-embed all files. Existing embeddings will be deleted because
+              vectors from different providers are incompatible.
+            </div>
+            <div style={s.dialogButtons}>
+              <button style={s.btn} onClick={() => setPendingProvider(null)}>Cancel</button>
+              <button
+                style={{ ...s.btn, background: '#0a84ff', color: '#fff', borderColor: 'transparent' }}
+                onClick={() => {
+                  const next = pendingProvider
+                  setPendingProvider(null)
+                  applyProviderChange(next)
                 }}
               >
                 Change &amp; Reset Index
@@ -285,6 +361,23 @@ function Row({ label, children }) {
       <div style={s.label}>{label}</div>
       <div style={s.rowControls}>{children}</div>
     </div>
+  )
+}
+
+function ProviderOption({ selected, onClick, title, desc }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{ ...s.providerOption, ...(selected ? s.providerOptionActive : {}) }}
+    >
+      <span style={s.providerRadio}>
+        <span style={{ ...s.providerRadioDot, ...(selected ? s.providerRadioDotActive : {}) }} />
+      </span>
+      <span style={s.providerOptionText}>
+        <span style={s.providerOptionTitle}>{title}</span>
+        <span style={s.providerOptionDesc}>{desc}</span>
+      </span>
+    </button>
   )
 }
 
@@ -397,6 +490,62 @@ const s = {
   readOnly: {
     fontSize: 13,
     color: '#0a84ff',
+  },
+  providerChoices: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    flex: 1,
+  },
+  providerOption: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: '10px 12px',
+    background: 'rgba(255,255,255,0.03)',
+    border: '1px solid rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    cursor: 'pointer',
+    textAlign: 'left',
+    transition: 'all 0.15s',
+  },
+  providerOptionActive: {
+    background: 'rgba(10,132,255,0.12)',
+    borderColor: '#0a84ff',
+  },
+  providerRadio: {
+    width: 16,
+    height: 16,
+    borderRadius: '50%',
+    border: '1.5px solid rgba(255,255,255,0.3)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    marginTop: 1,
+  },
+  providerRadioDot: {
+    width: 8,
+    height: 8,
+    borderRadius: '50%',
+    background: 'transparent',
+  },
+  providerRadioDotActive: {
+    background: '#0a84ff',
+  },
+  providerOptionText: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  providerOptionTitle: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#e5e5e7',
+  },
+  providerOptionDesc: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.45)',
   },
   saved: {
     fontSize: 12,

@@ -84,7 +84,11 @@ export default function Dashboard() {
       <div style={st.grid}>
         <StatCard label="Total Files" value={stats?.TotalFiles ?? '-'} />
         <StatCard label="Total Chunks" value={stats?.TotalChunks ?? '-'} />
-        <StatCard label="Embedding Model" value={stats?.EmbeddingModel || '-'} small />
+        <StatCard
+          label="Embedding Model"
+          value={stats?.EmbeddingModel ? `${stats.Provider || '-'} · ${stats.EmbeddingModel}` : '-'}
+          small
+        />
         <StatCard label="Last Indexed" value={formatTime(stats?.LastIndexedAt)} small />
       </div>
 

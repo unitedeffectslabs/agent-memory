@@ -1,7 +1,9 @@
 package store
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +13,7 @@ import (
 func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := NewSQLiteStore(filepath.Join(dir, "test.db"))
+	s, err := NewSQLiteStore(filepath.Join(dir, "test.db"), 1536)
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}
@@ -226,6 +228,20 @@ func TestStats(t *testing.T) {
 	if stats.TotalChunks != 1 {
 		t.Fatalf("want 1 chunk, got %d", stats.TotalChunks)
 	}
+
+	// Provider/model are reported straight from config; empty when unset.
+	if stats.Provider != "" || stats.EmbeddingModel != "" {
+		t.Fatalf("want empty provider/model when unconfigured, got %q/%q", stats.Provider, stats.EmbeddingModel)
+	}
+	s.SetConfig("embedding_provider", "local")
+	s.SetConfig("embedding_model", "multilingual-e5-small")
+	stats, _ = s.Stats()
+	if stats.Provider != "local" {
+		t.Fatalf("want provider 'local', got %q", stats.Provider)
+	}
+	if stats.EmbeddingModel != "multilingual-e5-small" {
+		t.Fatalf("want model 'multilingual-e5-small', got %q", stats.EmbeddingModel)
+	}
 }
 
 func TestReset(t *testing.T) {
@@ -246,6 +262,48 @@ func TestReset(t *testing.T) {
 	val, _ := s.GetConfig("k")
 	if val != "v" {
 		t.Fatalf("config should be preserved after reset, got %q", val)
+	}
+}
+
+func TestNewSQLiteStoreDimension(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "dim.db")
+
+	// Fresh DB created at 384 dims should accept a 384-wide embedding.
+	s, err := NewSQLiteStore(dbPath, 384)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(384): %v", err)
+	}
+	s.AddDirectory("/tmp/a")
+	dirs, _ := s.ListDirectories()
+	f := domain.File{DirectoryID: dirs[0].ID, Path: "/tmp/a/f.txt", Hash: "h", IndexedAt: time.Now().UTC()}
+	s.UpsertFile(f)
+	got, _ := s.GetFileByPath("/tmp/a/f.txt")
+
+	emb := make([]float32, 384)
+	emb[0] = 1
+	if err := s.InsertChunks(got.ID, []domain.Chunk{{Index: 0, Content: "x", TokenCount: 1, Embedding: emb}}); err != nil {
+		t.Fatalf("InsertChunks(384): %v", err)
+	}
+	s.Close()
+
+	// Reopening with a different dim must NOT change the existing table.
+	s2, err := NewSQLiteStore(dbPath, 1536)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	stats, _ := s2.Stats()
+	if stats.TotalChunks != 1 {
+		t.Fatalf("existing 384-dim data should survive reopen, got %d chunks", stats.TotalChunks)
+	}
+	// A 384-wide query still matches — table width was preserved as 384.
+	res, err := s2.Search(emb, 5, 0, 0)
+	if err != nil {
+		t.Fatalf("Search on preserved 384 table: %v", err)
+	}
+	if len(res) == 0 {
+		t.Fatal("expected a result from the preserved 384-dim table")
 	}
 }
 
@@ -285,5 +343,179 @@ func TestSearch(t *testing.T) {
 	}
 	if results[0].Content != "hello world" {
 		t.Fatalf("unexpected content: %q", results[0].Content)
+	}
+}
+
+// TestUpsertFileWithChunksAtomic pins the crash-safety contract: the
+// remove-old-chunks / upsert-file / insert-chunks sequence is one transaction,
+// so a failure partway through leaves the previous index entry fully intact —
+// never the file recorded at the new hash with missing chunks (which the hash
+// short-circuit would then skip forever).
+func TestUpsertFileWithChunksAtomic(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddDirectory("/tmp/a"); err != nil {
+		t.Fatal(err)
+	}
+	dirs, _ := s.ListDirectories()
+
+	emb := make([]float32, 1536)
+	emb[0] = 0.5
+
+	// Index v1 successfully.
+	v1 := domain.File{DirectoryID: dirs[0].ID, Path: "/tmp/a/doc.txt", Hash: "hash-v1", IndexedAt: time.Now().UTC()}
+	if err := s.UpsertFileWithChunks(v1, []domain.Chunk{
+		{Index: 0, Content: "v1 chunk zero", TokenCount: 3, Embedding: emb},
+		{Index: 1, Content: "v1 chunk one", TokenCount: 3, Embedding: emb},
+	}); err != nil {
+		t.Fatalf("v1 index: %v", err)
+	}
+	stored, _ := s.GetFileByPath("/tmp/a/doc.txt")
+	if stored == nil || stored.Hash != "hash-v1" {
+		t.Fatalf("v1 not stored correctly: %+v", stored)
+	}
+
+	// Attempt v2 with a chunk whose embedding has the WRONG dimension — the
+	// vec0 insert fails mid-transaction. Everything must roll back.
+	v2 := domain.File{ID: stored.ID, DirectoryID: dirs[0].ID, Path: "/tmp/a/doc.txt", Hash: "hash-v2", IndexedAt: time.Now().UTC()}
+	badEmb := []float32{1, 2, 3} // store was created with dim 1536
+	if err := s.UpsertFileWithChunks(v2, []domain.Chunk{
+		{Index: 0, Content: "v2 chunk zero", TokenCount: 3, Embedding: emb},
+		{Index: 1, Content: "v2 chunk one", TokenCount: 3, Embedding: badEmb},
+	}); err == nil {
+		t.Fatal("expected wrong-dimension embedding to fail the transaction")
+	}
+
+	// The file must still be recorded at hash-v1 with BOTH v1 chunks intact.
+	after, _ := s.GetFileByPath("/tmp/a/doc.txt")
+	if after == nil {
+		t.Fatal("file row vanished after failed update")
+	}
+	if after.Hash != "hash-v1" {
+		t.Fatalf("hash = %q after failed update, want hash-v1 (partial write leaked!)", after.Hash)
+	}
+	results, err := s.Search(emb, 10, 0, 0)
+	if err != nil {
+		t.Fatalf("search after rollback: %v", err)
+	}
+	v1Chunks := 0
+	for _, r := range results {
+		if r.FilePath == "/tmp/a/doc.txt" && strings.HasPrefix(r.Content, "v1 ") {
+			v1Chunks++
+		}
+	}
+	if v1Chunks != 2 {
+		t.Fatalf("searchable v1 chunks after rollback = %d, want 2", v1Chunks)
+	}
+
+	// A good v2 then replaces v1 completely.
+	if err := s.UpsertFileWithChunks(v2, []domain.Chunk{
+		{Index: 0, Content: "v2 only chunk", TokenCount: 3, Embedding: emb},
+	}); err != nil {
+		t.Fatalf("good v2 index: %v", err)
+	}
+	final, _ := s.GetFileByPath("/tmp/a/doc.txt")
+	if final.Hash != "hash-v2" {
+		t.Fatalf("hash = %q, want hash-v2", final.Hash)
+	}
+	results, _ = s.Search(emb, 10, 0, 0)
+	for _, r := range results {
+		if r.FilePath == "/tmp/a/doc.txt" && strings.HasPrefix(r.Content, "v1 ") {
+			t.Fatalf("stale v1 chunk still searchable after replace: %q", r.Content)
+		}
+	}
+}
+
+// TestUpsertLogEntryDedupes pins the one-living-row-per-(path,action)
+// contract: repeat failures update the existing row instead of appending.
+func TestUpsertLogEntryDedupes(t *testing.T) {
+	s := newTestStore(t)
+	e := domain.ActivityLogEntry{Timestamp: time.Now(), Path: "/a/b.pdf", Action: "error", Detail: "index: boom v1"}
+	if err := s.UpsertLogEntry(e); err != nil {
+		t.Fatal(err)
+	}
+	e.Detail = "index: boom v2"
+	e.Timestamp = time.Now().Add(time.Minute)
+	if err := s.UpsertLogEntry(e); err != nil {
+		t.Fatal(err)
+	}
+	entries, total, err := s.ListLogEntries(10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("total = %d entries = %d, want exactly 1 row", total, len(entries))
+	}
+	if entries[0].Detail != "index: boom v2" {
+		t.Fatalf("detail = %q, want the updated v2 detail", entries[0].Detail)
+	}
+	// A different path appends normally.
+	e2 := domain.ActivityLogEntry{Timestamp: time.Now(), Path: "/a/c.pdf", Action: "error", Detail: "index: other"}
+	if err := s.UpsertLogEntry(e2); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, _ = s.ListLogEntries(10, 0); total != 2 {
+		t.Fatalf("total = %d, want 2 after a second distinct path", total)
+	}
+}
+
+// TestActivityLogRetention pins the TTL prune at store open.
+func TestActivityLogRetention(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "retention.db")
+	s, err := NewSQLiteStore(dbPath, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := domain.ActivityLogEntry{Timestamp: time.Now().AddDate(0, 0, -60), Path: "/old.txt", Action: "indexed", Detail: "1 chunks"}
+	fresh := domain.ActivityLogEntry{Timestamp: time.Now(), Path: "/fresh.txt", Action: "indexed", Detail: "1 chunks"}
+	if err := s.InsertLogEntry(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertLogEntry(fresh); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Re-open: the 60-day-old row must be pruned, the fresh one kept.
+	s2, err := NewSQLiteStore(dbPath, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	entries, total, err := s2.ListLogEntries(10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || entries[0].Path != "/fresh.txt" {
+		t.Fatalf("after reopen: total = %d first = %+v, want only /fresh.txt", total, entries)
+	}
+}
+
+// TestSearchEmptyResultsMarshalsToArray pins the wire contract: an empty
+// result set must serialize as [] (not null) — strict JSON clients call
+// .length on it. Covers both the no-matches and offset-past-results branches.
+func TestSearchEmptyResultsMarshalsToArray(t *testing.T) {
+	s := newTestStore(t)
+	q := make([]float32, 1536)
+	q[0] = 1
+
+	for name, fn := range map[string]func() ([]domain.SearchResult, error){
+		"no matches":          func() ([]domain.SearchResult, error) { return s.Search(q, 5, 0, 0) },
+		"offset past results": func() ([]domain.SearchResult, error) { return s.Search(q, 5, 100, 0) },
+	} {
+		results, err := fn()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if results == nil {
+			t.Fatalf("%s: results is nil, must be an empty slice", name)
+		}
+		b, err := json.Marshal(results)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "[]" {
+			t.Fatalf("%s: marshals to %s, want []", name, b)
+		}
 	}
 }

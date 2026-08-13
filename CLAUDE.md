@@ -1,15 +1,23 @@
 # Agent Memory
 
-Local-first desktop app + MCP server for semantic file search. Watches directories, embeds file contents via OpenAI, stores vectors in SQLite (sqlite-vec), and provides KNN semantic search.
+Local-first desktop app + MCP server for semantic file search. Watches directories, embeds file contents (a bundled local model by default; OpenAI opt-in), stores vectors in SQLite (sqlite-vec), and provides KNN semantic search.
 
 ## Build & Run
 
 ```bash
-make build          # wails build -skipbindings (DO NOT use plain `wails build` — hangs on binding generation due to CGo)
+make assets         # download pinned local model/tokenizer/ORT libs into assets/embedded/ (~150 MB, checksummed via assets/manifest.json)
+make build          # wails build -skipbindings, builds with -tags localembed (DO NOT use plain `wails build` — hangs on binding generation due to CGo)
+make build-darwin-amd64  # cross-build the Intel-mac app from an arm64 Mac (swaps in darwin-amd64 assets)
 make dev            # hot-reload dev mode
-make test           # go test ./...
+make test           # go test ./... (default build, no localembed tag — stays native-lib-free)
 make clean          # rm -rf build/bin
 ```
+
+> `make build` depends on `make assets`, which downloads ~150 MB of native artifacts (model,
+> tokenizer, ONNX Runtime lib) the first time — needs network access. The build sets
+> `-tags localembed` plus `CGO_LDFLAGS` to link the tokenizer library; the resulting binary is
+> ~180 MB (it bundles the model). The native code is build-tag-isolated, so plain
+> `go test ./...` and CI need no assets.
 
 > **macOS 26+ gotcha:** Go ≤ 1.24 produces CGo binaries the kernel kills instantly on launch
 > (exit 137, `dyld: missing LC_UUID`) — this breaks `make build`, the `wails` CLI, and the built
@@ -44,7 +52,8 @@ Delivery (main.go, mcp/, tray.go, frontend/)
 |---------|---------|
 | `internal/engine` | Core orchestrator: scan → extract → chunk → embed → store |
 | `internal/store` | SQLite + sqlite-vec persistence (config, directories, files, chunks, vectors) |
-| `internal/embeddings` | OpenAI embedding client with batching (2048/req) and retry |
+| `internal/embeddings` | Embedder interface + OpenAI client (opt-in) with batching (2048/req) and retry |
+| `internal/embeddings/local` | Bundled in-process local embedder (default): ONNX Runtime + HF tokenizer, `multilingual-e5-small` (384-dim), offline |
 | `internal/chunker` | Token-based text splitting (tiktoken, cl100k_base) |
 | `internal/watcher` | fsnotify recursive directory watcher with 500ms debounce |
 | `internal/extractor` | Multi-format content extraction (text, docx, xlsx, pptx, pdf, images) |

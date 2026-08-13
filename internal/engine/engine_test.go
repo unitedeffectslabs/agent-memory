@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,9 +56,9 @@ func TestIndexFile(t *testing.T) {
 	var (
 		upsertedFile   domain.File
 		insertedChunks []domain.Chunk
-		insertedFileID int64
 	)
 
+	upsertCalled := false
 	ms := &mocks.MockStore{
 		GetFileByPathFn: func(path string) (*domain.File, error) {
 			return nil, nil // new file
@@ -64,27 +66,13 @@ func TestIndexFile(t *testing.T) {
 		ListDirectoriesFn: func() ([]domain.Directory, error) {
 			return []domain.Directory{{ID: 42, Path: dir}}, nil
 		},
-		UpsertFileFn: func(f domain.File) error {
+		// The atomic replace carries the file row and its chunks in one call.
+		UpsertFileWithChunksFn: func(f domain.File, chunks []domain.Chunk) error {
+			upsertCalled = true
 			upsertedFile = f
-			return nil
-		},
-		InsertChunksFn: func(fileID int64, chunks []domain.Chunk) error {
-			insertedFileID = fileID
 			insertedChunks = chunks
 			return nil
 		},
-	}
-
-	// After upsert, GetFileByPath should return the file with an ID.
-	upsertCalled := false
-	ms.UpsertFileFn = func(f domain.File) error {
-		upsertedFile = f
-		upsertCalled = true
-		// Simulate that after upsert, store returns the file with ID.
-		ms.GetFileByPathFn = func(path string) (*domain.File, error) {
-			return &domain.File{ID: 7, DirectoryID: 42, Path: path, Hash: expectedHash, IndexedAt: time.Now()}, nil
-		}
-		return nil
 	}
 
 	mc := &mocks.MockChunker{
@@ -97,7 +85,7 @@ func TestIndexFile(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			vecs := make([][]float32, len(texts))
 			for i := range texts {
 				vecs[i] = []float32{float32(i), 0.5}
@@ -115,16 +103,13 @@ func TestIndexFile(t *testing.T) {
 	}
 
 	if !upsertCalled {
-		t.Fatal("UpsertFile was not called")
+		t.Fatal("UpsertFileWithChunks was not called")
 	}
 	if upsertedFile.Hash != expectedHash {
 		t.Errorf("hash = %s, want %s", upsertedFile.Hash, expectedHash)
 	}
 	if upsertedFile.DirectoryID != 42 {
 		t.Errorf("directoryID = %d, want 42", upsertedFile.DirectoryID)
-	}
-	if insertedFileID != 7 {
-		t.Errorf("insertedFileID = %d, want 7", insertedFileID)
 	}
 	if len(insertedChunks) != 2 {
 		t.Fatalf("len(chunks) = %d, want 2", len(insertedChunks))
@@ -188,7 +173,7 @@ func TestSearch(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			if len(texts) != 1 || texts[0] != "test query" {
 				t.Errorf("unexpected texts: %v", texts)
 			}
@@ -332,8 +317,8 @@ func TestShouldSkipDir(t *testing.T) {
 		{".git/**", ".git", true},
 		{"vendor/**", "vendor", true},
 		{"vendor/**", "src", false},
-		{".git", ".git", true},    // exact match
-		{"*.log", "logs", false},  // file pattern doesn't skip dirs
+		{".git", ".git", true},   // exact match
+		{"*.log", "logs", false}, // file pattern doesn't skip dirs
 	}
 
 	for _, tc := range cases {
@@ -473,15 +458,11 @@ func TestAddDirectorySkipsIgnoredFiles(t *testing.T) {
 		GetFileByPathFn: func(path string) (*domain.File, error) {
 			return nil, nil
 		},
-		InsertChunksFn: func(fileID int64, chunks []domain.Chunk) error { return nil },
 	}
 
-	// Track indexed paths via UpsertFile, since IndexFile now uses ChunkText (no filePath arg).
-	ms.UpsertFileFn = func(f domain.File) error {
+	// Track indexed paths via the atomic replace call.
+	ms.UpsertFileWithChunksFn = func(f domain.File, chunks []domain.Chunk) error {
 		indexedPaths = append(indexedPaths, f.Path)
-		ms.GetFileByPathFn = func(path string) (*domain.File, error) {
-			return &domain.File{ID: 1, Path: path}, nil
-		}
 		return nil
 	}
 
@@ -492,7 +473,7 @@ func TestAddDirectorySkipsIgnoredFiles(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			vecs := make([][]float32, len(texts))
 			for i := range texts {
 				vecs[i] = []float32{0.1}
@@ -615,5 +596,150 @@ func TestReset(t *testing.T) {
 	}
 	if resetDim != 1536 {
 		t.Errorf("store.Reset dimension = %d, want 1536", resetDim)
+	}
+}
+
+// TestIndexErrorsAreLoggedToActivityLog is a regression test for silent
+// indexing failures: when IndexFile errors during AddDirectory or a watcher
+// event, the failure must land in the activity log (the Log page), not just
+// the invisible process stderr. Found when an embedding bug silently dropped
+// 79 of 105 real-vault files with zero user-visible signal.
+func TestIndexErrorsAreLoggedToActivityLog(t *testing.T) {
+	dir := t.TempDir()
+	tempFileInDir(t, dir, "doc.txt", "some content that will fail to embed")
+
+	var logged []domain.ActivityLogEntry
+	ms := &mocks.MockStore{
+		AddDirectoryFn:  func(path string) error { return nil },
+		GetConfigFn:     func(key string) (string, error) { return "", nil },
+		GetFileByPathFn: func(path string) (*domain.File, error) { return nil, nil },
+		ListDirectoriesFn: func() ([]domain.Directory, error) {
+			return []domain.Directory{{ID: 1, Path: dir}}, nil
+		},
+		// Error rows flow through the per-path upsert.
+		UpsertLogEntryFn: func(entry domain.ActivityLogEntry) error {
+			logged = append(logged, entry)
+			return nil
+		},
+	}
+	mc := &mocks.MockChunker{
+		ChunkTextFn: func(content string) ([]chunker.ChunkResult, error) {
+			return []chunker.ChunkResult{{Content: content, TokenCount: 5}}, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			return nil, fmt.Errorf("embedder exploded")
+		},
+	}
+	eng := New(ms, me, mc, &mocks.MockWatcher{}, defaultMockExtractor())
+
+	assertErrorLogged := func(caller string) {
+		t.Helper()
+		found := 0
+		for _, e := range logged {
+			if e.Action == "error" && strings.Contains(e.Detail, "embedder exploded") {
+				found++
+			}
+		}
+		if found == 0 {
+			t.Fatalf("%s: index failure not logged to activity log; got %+v", caller, logged)
+		}
+		if found > 1 {
+			t.Fatalf("%s: index failure logged %d times, want exactly once (caller double-log?)", caller, found)
+		}
+	}
+
+	// AddDirectory path.
+	if err := eng.AddDirectory(dir); err != nil {
+		t.Fatalf("AddDirectory: %v", err)
+	}
+	assertErrorLogged("AddDirectory")
+
+	// initialScan path — the startup rescan where the motivating field
+	// incident (79 files silently dropped) actually happened. Synchronous
+	// when called directly.
+	logged = nil
+	eng.initialScan()
+	assertErrorLogged("initialScan")
+
+	// Watcher-event paths.
+	logged = nil
+	eng.OnCreate(filepath.Join(dir, "doc.txt"))
+	assertErrorLogged("OnCreate")
+	logged = nil
+	eng.OnModify(filepath.Join(dir, "doc.txt"))
+	assertErrorLogged("OnModify")
+}
+
+// TestStopWaitsForInflightIndexing pins the shutdown contract: Stop() must not
+// return while a file is mid-index, so shutdown (Stop then Close) never closes
+// the store under an active write. The embedder blocks until the test releases
+// it; Stop() must block with it, then return only after the file's store write
+// completed.
+func TestStopWaitsForInflightIndexing(t *testing.T) {
+	dir := t.TempDir()
+	tempFileInDir(t, dir, "doc.txt", "content to index slowly")
+
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	var wroteFile atomic.Bool
+
+	ms := &mocks.MockStore{
+		AddDirectoryFn:  func(path string) error { return nil },
+		GetConfigFn:     func(key string) (string, error) { return "", nil },
+		GetFileByPathFn: func(path string) (*domain.File, error) { return nil, nil },
+		ListDirectoriesFn: func() ([]domain.Directory, error) {
+			return []domain.Directory{{ID: 1, Path: dir}}, nil
+		},
+		UpsertFileWithChunksFn: func(f domain.File, chunks []domain.Chunk) error {
+			wroteFile.Store(true)
+			return nil
+		},
+	}
+	mc := &mocks.MockChunker{
+		ChunkTextFn: func(content string) ([]chunker.ChunkResult, error) {
+			return []chunker.ChunkResult{{Content: content, TokenCount: 3}}, nil
+		},
+	}
+	var startOnce sync.Once
+	me := &mocks.MockEmbedder{
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			startOnce.Do(func() { close(embedStarted) })
+			<-releaseEmbed // hold the file mid-index until the test releases it
+			return [][]float32{{0.1, 0.2}}, nil
+		},
+	}
+	// No eng.Start(): AddDirectory indexes on its own, and Stop()'s wait
+	// contract must hold regardless of whether the watcher was started.
+	eng := New(ms, me, mc, &mocks.MockWatcher{}, defaultMockExtractor())
+
+	go func() { _ = eng.AddDirectory(dir) }()
+	<-embedStarted // the file is now mid-index
+
+	stopReturned := make(chan struct{})
+	go func() {
+		_ = eng.Stop()
+		close(stopReturned)
+	}()
+
+	// Stop must NOT return while the file is still embedding.
+	select {
+	case <-stopReturned:
+		t.Fatal("Stop() returned while a file was mid-index")
+	case <-time.After(100 * time.Millisecond):
+		// good: still waiting
+	}
+
+	close(releaseEmbed) // let the in-flight file finish
+
+	select {
+	case <-stopReturned:
+		// good: Stop returned once the file boundary was reached
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not return after in-flight indexing completed")
+	}
+	if !wroteFile.Load() {
+		t.Fatal("in-flight file's store write did not complete before Stop returned")
 	}
 }

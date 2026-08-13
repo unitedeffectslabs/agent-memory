@@ -14,22 +14,22 @@ import (
 // ---------------------------------------------------------------------------
 
 type MockStore struct {
-	GetConfigFn         func(key string) (string, error)
-	SetConfigFn         func(key, value string) error
-	AddDirectoryFn      func(path string) error
-	RemoveDirectoryFn   func(path string) error
-	ListDirectoriesFn   func() ([]domain.Directory, error)
-	UpsertFileFn        func(f domain.File) error
-	RemoveFileFn        func(path string) error
-	GetFileByPathFn     func(path string) (*domain.File, error)
-	InsertChunksFn      func(fileID int64, chunks []domain.Chunk) error
-	RemoveChunksByFileFn func(fileID int64) error
-	SearchFn            func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
-	StatsFn             func() (domain.IndexStats, error)
-	InsertLogEntryFn    func(entry domain.ActivityLogEntry) error
-	ListLogEntriesFn    func(limit, offset int) ([]domain.ActivityLogEntry, int, error)
-	ResetFn             func(embeddingDimension int) error
-	CloseFn             func() error
+	GetConfigFn            func(key string) (string, error)
+	SetConfigFn            func(key, value string) error
+	AddDirectoryFn         func(path string) error
+	RemoveDirectoryFn      func(path string) error
+	ListDirectoriesFn      func() ([]domain.Directory, error)
+	RemoveFileFn           func(path string) error
+	GetFileByPathFn        func(path string) (*domain.File, error)
+	UpsertFileWithChunksFn func(f domain.File, chunks []domain.Chunk) error
+	UpsertLogEntryFn       func(entry domain.ActivityLogEntry) error
+	RemoveChunksByFileFn   func(fileID int64) error
+	SearchFn               func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error)
+	StatsFn                func() (domain.IndexStats, error)
+	InsertLogEntryFn       func(entry domain.ActivityLogEntry) error
+	ListLogEntriesFn       func(limit, offset int) ([]domain.ActivityLogEntry, int, error)
+	ResetFn                func(embeddingDimension int) error
+	CloseFn                func() error
 }
 
 func (m *MockStore) GetConfig(key string) (string, error) {
@@ -67,9 +67,16 @@ func (m *MockStore) ListDirectories() ([]domain.Directory, error) {
 	return nil, nil
 }
 
-func (m *MockStore) UpsertFile(f domain.File) error {
-	if m.UpsertFileFn != nil {
-		return m.UpsertFileFn(f)
+func (m *MockStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk) error {
+	if m.UpsertFileWithChunksFn != nil {
+		return m.UpsertFileWithChunksFn(f, chunks)
+	}
+	return nil
+}
+
+func (m *MockStore) UpsertLogEntry(entry domain.ActivityLogEntry) error {
+	if m.UpsertLogEntryFn != nil {
+		return m.UpsertLogEntryFn(entry)
 	}
 	return nil
 }
@@ -86,13 +93,6 @@ func (m *MockStore) GetFileByPath(path string) (*domain.File, error) {
 		return m.GetFileByPathFn(path)
 	}
 	return nil, nil
-}
-
-func (m *MockStore) InsertChunks(fileID int64, chunks []domain.Chunk) error {
-	if m.InsertChunksFn != nil {
-		return m.InsertChunksFn(fileID, chunks)
-	}
-	return nil
 }
 
 func (m *MockStore) RemoveChunksByFile(fileID int64) error {
@@ -149,14 +149,34 @@ func (m *MockStore) Close() error {
 // ---------------------------------------------------------------------------
 
 type MockEmbedder struct {
-	EmbedFn      func(texts []string) ([][]float32, error)
-	DimensionsFn func() int
-	ModelNameFn  func() string
+	EmbedDocumentsFn func(texts []string) ([][]float32, error)
+	EmbedQueryFn     func(text string) ([]float32, error)
+	DimensionsFn     func() int
+	ModelNameFn      func() string
+	MaxInputTokensFn func() int
 }
 
-func (m *MockEmbedder) Embed(texts []string) ([][]float32, error) {
-	if m.EmbedFn != nil {
-		return m.EmbedFn(texts)
+func (m *MockEmbedder) EmbedDocuments(texts []string) ([][]float32, error) {
+	if m.EmbedDocumentsFn != nil {
+		return m.EmbedDocumentsFn(texts)
+	}
+	return nil, nil
+}
+
+func (m *MockEmbedder) EmbedQuery(text string) ([]float32, error) {
+	if m.EmbedQueryFn != nil {
+		return m.EmbedQueryFn(text)
+	}
+	// Fallback: reuse EmbedDocumentsFn so search tests don't need a separate stub.
+	if m.EmbedDocumentsFn != nil {
+		vecs, err := m.EmbedDocumentsFn([]string{text})
+		if err != nil {
+			return nil, err
+		}
+		if len(vecs) == 0 {
+			return nil, nil
+		}
+		return vecs[0], nil
 	}
 	return nil, nil
 }
@@ -173,6 +193,13 @@ func (m *MockEmbedder) ModelName() string {
 		return m.ModelNameFn()
 	}
 	return ""
+}
+
+func (m *MockEmbedder) MaxInputTokens() int {
+	if m.MaxInputTokensFn != nil {
+		return m.MaxInputTokensFn()
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------

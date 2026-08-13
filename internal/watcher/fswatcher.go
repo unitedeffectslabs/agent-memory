@@ -20,6 +20,7 @@ type FSWatcher struct {
 	stopCh   chan struct{}
 	handler  FileEventHandler
 	timers   map[string]*time.Timer
+	pending  map[string]fsnotify.Op
 	timersMu sync.Mutex
 }
 
@@ -32,6 +33,7 @@ func NewFSWatcher() (*FSWatcher, error) {
 	return &FSWatcher{
 		watcher: w,
 		timers:  make(map[string]*time.Timer),
+		pending: make(map[string]fsnotify.Op),
 	}, nil
 }
 
@@ -100,31 +102,58 @@ func (fw *FSWatcher) handleEvent(event fsnotify.Event) {
 		}
 	}
 
-	fw.debounce(path, func() {
-		if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-			fw.handler.OnDelete(path)
-		} else if event.Has(fsnotify.Create) {
-			fw.handler.OnCreate(path)
-		} else if event.Has(fsnotify.Write) || event.Has(fsnotify.Chmod) {
-			fw.handler.OnModify(path)
-		}
-	})
+	fw.debounce(path, event.Op)
 }
 
-func (fw *FSWatcher) debounce(path string, fn func()) {
+// debounce coalesces events per path for debounceDuration. Ops are merged
+// (OR-ed), not replaced: on Linux, writing a new file emits CREATE then WRITE
+// as separate events within milliseconds — replacing the pending event would
+// swallow the CREATE and misreport the file as modified (macOS coalesces
+// differently, which long masked this).
+func (fw *FSWatcher) debounce(path string, op fsnotify.Op) {
 	fw.timersMu.Lock()
 	defer fw.timersMu.Unlock()
 
+	fw.pending[path] |= op
 	if t, ok := fw.timers[path]; ok {
 		t.Stop()
 	}
 
 	fw.timers[path] = time.AfterFunc(debounceDuration, func() {
-		fn()
 		fw.timersMu.Lock()
+		merged := fw.pending[path]
+		delete(fw.pending, path)
 		delete(fw.timers, path)
 		fw.timersMu.Unlock()
+		fw.dispatch(path, merged)
 	})
+}
+
+// dispatch classifies a merged op set. Precedence: a removal ends the story
+// regardless of what preceded it; a creation outranks the writes that filled
+// the new file with content. Exception: atomic-save editors (vim with
+// backupcopy=no, and similar rename-then-recreate patterns) emit RENAME then
+// CREATE for the same path within one debounce window — the merged set carries
+// Rename, but the file still exists and must not be dropped from the index, so
+// a Remove/Rename verdict is confirmed against the filesystem before firing.
+func (fw *FSWatcher) dispatch(path string, op fsnotify.Op) {
+	switch {
+	case op.Has(fsnotify.Remove) || op.Has(fsnotify.Rename):
+		if _, err := os.Stat(path); err == nil {
+			// Path still exists: rename-and-recreate, not a deletion.
+			if op.Has(fsnotify.Create) {
+				fw.handler.OnCreate(path)
+			} else {
+				fw.handler.OnModify(path)
+			}
+			return
+		}
+		fw.handler.OnDelete(path)
+	case op.Has(fsnotify.Create):
+		fw.handler.OnCreate(path)
+	case op.Has(fsnotify.Write) || op.Has(fsnotify.Chmod):
+		fw.handler.OnModify(path)
+	}
 }
 
 // Stop halts the event processing goroutine but keeps the fsnotify watcher
@@ -141,12 +170,13 @@ func (fw *FSWatcher) Stop() error {
 	close(fw.stopCh)
 	fw.running = false
 
-	// Cancel pending debounce timers.
+	// Cancel pending debounce timers and drop their merged ops.
 	fw.timersMu.Lock()
 	for _, t := range fw.timers {
 		t.Stop()
 	}
 	fw.timers = make(map[string]*time.Timer)
+	fw.pending = make(map[string]fsnotify.Op)
 	fw.timersMu.Unlock()
 
 	return nil

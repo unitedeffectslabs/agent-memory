@@ -18,15 +18,17 @@ func TestReadOnlySearch(t *testing.T) {
 			if limit != 10 {
 				t.Errorf("expected default limit 10, got %d", limit)
 			}
-			if threshold != 1.5 {
-				t.Errorf("expected default threshold 1.5, got %f", threshold)
+			// No provider configured → falls back to the local default provider,
+			// whose default threshold is 0.6.
+			if threshold != 0.6 {
+				t.Errorf("expected default threshold 0.6, got %f", threshold)
 			}
 			return expected, nil
 		},
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return [][]float32{{1.0, 2.0}}, nil
 		},
 	}
@@ -59,7 +61,7 @@ func TestReadOnlySearch_ExplicitParams(t *testing.T) {
 	}
 
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return [][]float32{{1.0}}, nil
 		},
 	}
@@ -71,10 +73,94 @@ func TestReadOnlySearch_ExplicitParams(t *testing.T) {
 	}
 }
 
+func TestReadOnlySearch_ProviderAwareThreshold(t *testing.T) {
+	ms := &mocks.MockStore{
+		GetConfigFn: func(key string) (string, error) {
+			if key == "embedding_provider" {
+				return "openai", nil
+			}
+			return "", nil
+		},
+		SearchFn: func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error) {
+			// OpenAI provider default threshold is 1.5.
+			if threshold != 1.5 {
+				t.Errorf("expected openai default threshold 1.5, got %f", threshold)
+			}
+			return nil, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			return [][]float32{{1.0}}, nil
+		},
+	}
+
+	ro := NewReadOnly(ms, me)
+	if _, err := ro.Search(domain.SearchParams{Query: "test"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+}
+
+func TestReadOnlySearch_DimensionMismatch(t *testing.T) {
+	searchCalled := false
+	ms := &mocks.MockStore{
+		GetConfigFn: func(key string) (string, error) {
+			if key == "embedding_dimension" {
+				return "1536", nil // index built with a 1536-dim model
+			}
+			return "", nil
+		},
+		SearchFn: func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error) {
+			searchCalled = true
+			return nil, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		DimensionsFn: func() int { return 384 }, // active provider is 384-dim
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			return [][]float32{{1.0}}, nil
+		},
+	}
+
+	ro := NewReadOnly(ms, me)
+	_, err := ro.Search(domain.SearchParams{Query: "test"})
+	if err == nil {
+		t.Fatal("expected dimension-mismatch error, got nil")
+	}
+	if searchCalled {
+		t.Error("store.Search must not be called on a dimension mismatch")
+	}
+}
+
+func TestReadOnlySearch_DimensionMatch(t *testing.T) {
+	ms := &mocks.MockStore{
+		GetConfigFn: func(key string) (string, error) {
+			if key == "embedding_dimension" {
+				return "384", nil
+			}
+			return "", nil
+		},
+		SearchFn: func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		DimensionsFn: func() int { return 384 },
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			return [][]float32{{1.0}}, nil
+		},
+	}
+
+	ro := NewReadOnly(ms, me)
+	if _, err := ro.Search(domain.SearchParams{Query: "test"}); err != nil {
+		t.Fatalf("Search with matching dimension should succeed: %v", err)
+	}
+}
+
 func TestReadOnlySearch_EmbedderError(t *testing.T) {
 	ms := &mocks.MockStore{}
 	me := &mocks.MockEmbedder{
-		EmbedFn: func(texts []string) ([][]float32, error) {
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
 			return nil, fmt.Errorf("no API key configured")
 		},
 	}
@@ -161,5 +247,73 @@ func TestReadOnlyGetIgnorePatterns_Defaults(t *testing.T) {
 	}
 	if len(patterns) != len(DefaultIgnorePatterns) {
 		t.Errorf("expected default patterns, got %d", len(patterns))
+	}
+}
+
+// TestReadOnlySearch_FingerprintMismatchSameDimension pins the case the bare
+// dimension guard is blind to: a same-width model swap (e.g. the epic's named
+// upgrade candidate granite-97m is also 384-dim). Mixed vectors would return
+// garbage-ranked results silently.
+func TestReadOnlySearch_FingerprintMismatchSameDimension(t *testing.T) {
+	searchCalled := false
+	ms := &mocks.MockStore{
+		GetConfigFn: func(key string) (string, error) {
+			switch key {
+			case "embedding_fingerprint":
+				return "local:multilingual-e5-small:384", nil // index identity
+			case "embedding_provider":
+				return "local", nil
+			}
+			return "", nil
+		},
+		SearchFn: func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error) {
+			searchCalled = true
+			return nil, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		DimensionsFn: func() int { return 384 },                          // SAME dimension...
+		ModelNameFn:  func() string { return "granite-embedding-97m" },   // ...different model
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			return [][]float32{{1.0}}, nil
+		},
+	}
+
+	ro := NewReadOnly(ms, me)
+	_, err := ro.Search(domain.SearchParams{Query: "test"})
+	if err == nil {
+		t.Fatal("expected fingerprint-mismatch error for same-dimension model swap, got nil")
+	}
+	if searchCalled {
+		t.Error("store.Search must not be called on a fingerprint mismatch")
+	}
+}
+
+// TestReadOnlySearch_FingerprintMatch: matching fingerprints search normally.
+func TestReadOnlySearch_FingerprintMatch(t *testing.T) {
+	ms := &mocks.MockStore{
+		GetConfigFn: func(key string) (string, error) {
+			switch key {
+			case "embedding_fingerprint":
+				return "local:multilingual-e5-small:384", nil
+			case "embedding_provider":
+				return "local", nil
+			}
+			return "", nil
+		},
+		SearchFn: func(embedding []float32, limit, offset int, threshold float32) ([]domain.SearchResult, error) {
+			return []domain.SearchResult{}, nil
+		},
+	}
+	me := &mocks.MockEmbedder{
+		DimensionsFn: func() int { return 384 },
+		ModelNameFn:  func() string { return "multilingual-e5-small" },
+		EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+			return [][]float32{{1.0}}, nil
+		},
+	}
+	ro := NewReadOnly(ms, me)
+	if _, err := ro.Search(domain.SearchParams{Query: "test"}); err != nil {
+		t.Fatalf("matching fingerprint should search cleanly: %v", err)
 	}
 }

@@ -43,3 +43,9 @@ Desktop.ini
 
 # Scratchpad
 scratchpad/
+
+# Local-embedding assets (downloaded by `make assets`, never committed).
+# Runtime assets that get go:embed-ed into the localembed build:
+internal/embeddings/local/embedded/
+# Link-time static tokenizer lib (pulled in via CGO_LDFLAGS):
+internal/embeddings/local/lib/

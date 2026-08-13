@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/borzou/vecstore/internal/domain"
 	"github.com/borzou/vecstore/internal/embeddings"
@@ -26,18 +27,44 @@ func (ro *ReadOnlyEngine) Search(params domain.SearchParams) ([]domain.SearchRes
 	if params.Limit <= 0 {
 		params.Limit = 10
 	}
+
+	// Resolve the provider through the SAME policy the composition root used
+	// to build this process's embedder (config, else key-implies-openai, else
+	// default). Reading the config value alone would diverge on legacy DBs
+	// where only an API key is set: main.go wires an OpenAI embedder while a
+	// config-only read here would resolve 'local' — mis-picking the threshold
+	// and mislabeling the fingerprint.
+	providerCfg, _ := ro.store.GetConfig("embedding_provider")
+	apiKey, _ := ro.store.GetConfig("openai_api_key")
+	provider := embeddings.ResolveProvider(providerCfg, apiKey)
 	if params.Threshold <= 0 {
-		params.Threshold = 1.5
+		params.Threshold = embeddings.DefaultThreshold(provider)
 	}
 
-	vectors, err := ro.embedder.Embed([]string{params.Query})
+	// Guard against querying an index built with a different embedding model
+	// than the one this read-only process is configured with. The full
+	// fingerprint (provider:model:dimensions, per the epic) catches
+	// same-dimension model swaps that the bare dimension cannot; the dimension
+	// check remains as fallback for DBs written before the fingerprint existed.
+	ownFP := embeddings.Fingerprint(provider, ro.embedder)
+	if indexFP, _ := ro.store.GetConfig("embedding_fingerprint"); indexFP != "" {
+		if indexFP != ownFP {
+			return nil, fmt.Errorf("index was built with embedding %q but this process is configured for %q — mixed vectors would return garbage-ranked results; reopen the GUI app to rebuild the index", indexFP, ownFP)
+		}
+	} else if dimStr, _ := ro.store.GetConfig("embedding_dimension"); dimStr != "" {
+		if indexDim, convErr := strconv.Atoi(dimStr); convErr == nil && indexDim != ro.embedder.Dimensions() {
+			return nil, fmt.Errorf("index was built with a different embedding model (dim %d) than the active provider (dim %d) — reopen the GUI app to rebuild the index", indexDim, ro.embedder.Dimensions())
+		}
+	}
+
+	vector, err := ro.embedder.EmbedQuery(params.Query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	if len(vectors) == 0 {
+	if len(vector) == 0 {
 		return nil, fmt.Errorf("embedder returned no vectors")
 	}
-	return ro.store.Search(vectors[0], params.Limit, params.Offset, params.Threshold)
+	return ro.store.Search(vector, params.Limit, params.Offset, params.Threshold)
 }
 
 // ListDirectories returns all watched directories from the store.

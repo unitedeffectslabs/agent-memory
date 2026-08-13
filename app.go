@@ -10,9 +10,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
+	"strconv"
 
+	"github.com/borzou/vecstore/internal/chunker"
 	"github.com/borzou/vecstore/internal/domain"
 	"github.com/borzou/vecstore/internal/embeddings"
+	"github.com/borzou/vecstore/internal/embeddings/local"
 	"github.com/borzou/vecstore/internal/engine"
 	"github.com/borzou/vecstore/internal/mcp"
 	"github.com/borzou/vecstore/internal/store"
@@ -23,9 +27,59 @@ import (
 // appInstance is a package-level reference so CGo tray callbacks can reach the app.
 var appInstance *App
 
-// EmbedderFactory creates an Embedder for the given API key and model.
-// Injected by main.go so app.go doesn't depend on concrete embedder packages.
-type EmbedderFactory func(apiKey, model string) embeddings.Embedder
+// EmbedderFactory creates an Embedder for the given provider, API key and model.
+// Injected by main.go so app.go doesn't own provider-to-implementation wiring.
+type EmbedderFactory func(provider, apiKey, model string) (embeddings.Embedder, error)
+
+// resolveProvider delegates to the single shared policy in the embeddings
+// package (an explicit provider wins; else an OpenAI key implies openai; else
+// the default) — the engine and read-only search resolve through the same
+// function, so the rule cannot drift between processes.
+func resolveProvider(configuredProvider, apiKey string) string {
+	return embeddings.ResolveProvider(configuredProvider, apiKey)
+}
+
+// resolveModel returns the stored model if set, else the provider's default.
+func resolveModel(provider, storedModel string) string {
+	if storedModel != "" {
+		return storedModel
+	}
+	return embeddings.DefaultModel(provider)
+}
+
+// buildChunker constructs a chunker matched to the embedding provider, reusing
+// the stored chunk_size/chunk_overlap config. For the local provider it injects
+// the model's own tokenizer and clamps chunk size to the model's context window
+// so chunks are measured in the embedding model's tokens.
+func buildChunker(cfg *store.SQLiteStore, provider string, embedder embeddings.Embedder) (chunker.Chunker, error) {
+	var opts []chunker.Option
+	if sizeStr, _ := cfg.GetConfig("chunk_size"); sizeStr != "" {
+		if size, err := strconv.Atoi(sizeStr); err == nil {
+			opts = append(opts, chunker.WithChunkSize(size))
+		}
+	}
+	if overlapStr, _ := cfg.GetConfig("chunk_overlap"); overlapStr != "" {
+		if overlap, err := strconv.Atoi(overlapStr); err == nil {
+			opts = append(opts, chunker.WithOverlap(overlap))
+		}
+	}
+	if provider == embeddings.ProviderLocal {
+		tok, err := local.NewChunkerTokenizer(local.Config{})
+		if err != nil {
+			return nil, fmt.Errorf("local chunker tokenizer: %w", err)
+		}
+		// Budget below the model's hard limit: the embedder prepends the E5
+		// prefix and the tokenizer adds special tokens AFTER chunking, so a
+		// chunk cut exactly at MaxInputTokens overflows the model (512+prefix
+		// → the "512 by 516" ORT failure that silently dropped every
+		// multi-chunk file). Epic: effective chunk size ≈ 480.
+		opts = append(opts,
+			chunker.WithTokenizer(tok),
+			chunker.WithMaxInputTokens(embedder.MaxInputTokens()-local.EmbedTokenReserve),
+		)
+	}
+	return chunker.New(opts...)
+}
 
 // App exposes methods to the Wails frontend.
 type App struct {
@@ -62,6 +116,12 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	if err := a.mcpServer.Stop(); err != nil {
 		log.Printf("mcp server stop: %v", err)
+	}
+	// Stop before Close: cancel in-flight indexing and wait for it to reach a
+	// file boundary so the store never shuts down under an active write. With
+	// close=quit on Windows/Linux, quitting mid-scan is a routine event.
+	if err := a.engine.Stop(); err != nil {
+		log.Printf("engine stop: %v", err)
 	}
 	if err := a.engine.Close(); err != nil {
 		log.Printf("engine close: %v", err)
@@ -153,36 +213,84 @@ func (a *App) GetConfig(key string) string {
 	return val
 }
 
+// currentProvider resolves the active embedding provider from config, applying
+// the same policy as the composition root.
+func (a *App) currentProvider() string {
+	provider, _ := a.store.GetConfig("embedding_provider")
+	apiKey, _ := a.store.GetConfig("openai_api_key")
+	return resolveProvider(provider, apiKey)
+}
+
 // SetConfig writes a configuration value to the store.
-// If the embedding model changes, the embedder is swapped and the index is
-// reset — the virtual table must be recreated with the new dimension.
-// If the API key changes, the embedder is swapped so new requests use it.
+//   - embedding_provider: persist, rebuild the embedder AND the matched chunker,
+//     then reset the index (the vector table is recreated at the new dimension).
+//   - embedding_model: only meaningful for the active provider; rebuild the
+//     embedder and reset (dimension may change, e.g. OpenAI small↔large).
+//   - openai_api_key: only re-swap the embedder when openai is the active provider.
 func (a *App) SetConfig(key, value string) error {
 	switch key {
+	case "embedding_provider":
+		oldProvider := a.currentProvider()
+		if oldProvider == value {
+			return a.store.SetConfig(key, value)
+		}
+		log.Printf("[SetConfig] embedding provider changed %s → %s — swapping embedder+chunker and resetting index", oldProvider, value)
+		if err := a.store.SetConfig(key, value); err != nil {
+			return err
+		}
+		// Provider switch uses the provider's default model; the local model is
+		// fixed, and OpenAI users can adjust embedding_model afterward.
+		model := embeddings.DefaultModel(value)
+		apiKey, _ := a.store.GetConfig("openai_api_key")
+		embedder, err := a.newEmbedder(value, apiKey, model)
+		if err != nil {
+			return fmt.Errorf("build embedder for provider %s: %w", value, err)
+		}
+		newChunker, err := buildChunker(a.store, value, embedder)
+		if err != nil {
+			return fmt.Errorf("build chunker for provider %s: %w", value, err)
+		}
+		if err := a.store.SetConfig("embedding_model", model); err != nil {
+			return err
+		}
+		a.engine.SetEmbedder(embedder)
+		a.engine.SetChunker(newChunker)
+		return a.engine.Reset()
+
 	case "embedding_model":
+		provider := a.currentProvider()
 		oldModel, _ := a.store.GetConfig("embedding_model")
 		if oldModel == "" {
-			oldModel = "text-embedding-3-small"
+			oldModel = embeddings.DefaultModel(provider)
 		}
-		if oldModel != value {
-			log.Printf("[SetConfig] embedding model changed %s → %s — resetting index", oldModel, value)
-			if err := a.store.SetConfig(key, value); err != nil {
-				return err
-			}
-			apiKey, _ := a.store.GetConfig("openai_api_key")
-			a.engine.SetEmbedder(a.newEmbedder(apiKey, value))
-			return a.engine.Reset()
+		if oldModel == value {
+			return nil
 		}
+		log.Printf("[SetConfig] embedding model changed %s → %s — resetting index", oldModel, value)
+		if err := a.store.SetConfig(key, value); err != nil {
+			return err
+		}
+		apiKey, _ := a.store.GetConfig("openai_api_key")
+		embedder, err := a.newEmbedder(provider, apiKey, value)
+		if err != nil {
+			return fmt.Errorf("build embedder: %w", err)
+		}
+		a.engine.SetEmbedder(embedder)
+		return a.engine.Reset()
 
 	case "openai_api_key":
 		if err := a.store.SetConfig(key, value); err != nil {
 			return err
 		}
-		model, _ := a.store.GetConfig("embedding_model")
-		if model == "" {
-			model = "text-embedding-3-small"
+		// A key change only affects requests when openai is the active provider.
+		if a.currentProvider() == embeddings.ProviderOpenAI {
+			model := resolveModel(embeddings.ProviderOpenAI, a.GetConfig("embedding_model"))
+			embedder, err := a.newEmbedder(embeddings.ProviderOpenAI, value, model)
+			if err != nil {
+				return fmt.Errorf("build embedder: %w", err)
+			}
+			a.engine.SetEmbedder(embedder)
 		}
-		a.engine.SetEmbedder(a.newEmbedder(value, model))
 		return nil
 	}
 
@@ -282,10 +390,28 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// defaultClaudeDesktopConfigPath returns the standard Claude Desktop config location.
+// defaultClaudeDesktopConfigPath returns the standard Claude Desktop config
+// location for the current OS. Claude Desktop reads a different path per
+// platform; writing the macOS path on Windows produces a config it never sees
+// (while still reporting success — the Phase 5 Windows smoke caught exactly that).
 func defaultClaudeDesktopConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	switch goruntime.GOOS {
+	case "windows":
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return filepath.Join(appData, "Claude", "claude_desktop_config.json")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json")
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	default: // linux
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, "Claude", "claude_desktop_config.json")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".config", "Claude", "claude_desktop_config.json")
+	}
 }
 
 // GetClaudeDesktopConfigPath returns the current config path (custom or default).
