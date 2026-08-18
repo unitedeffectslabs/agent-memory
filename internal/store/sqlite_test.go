@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -517,5 +518,57 @@ func TestSearchEmptyResultsMarshalsToArray(t *testing.T) {
 		if string(b) != "[]" {
 			t.Fatalf("%s: marshals to %s, want []", name, b)
 		}
+	}
+}
+
+// TestExtractorVersionMigrationAndRoundtrip: DBs created before the
+// extractor_version column existed must gain it on open (additive ALTER), old
+// rows read as 0, and the field round-trips through upsert/get.
+func TestExtractorVersionMigrationAndRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	// Build a legacy DB by hand: the pre-column files schema + one row.
+	legacy, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`CREATE TABLE directories (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE NOT NULL, file_count INTEGER NOT NULL DEFAULT 0, chunk_count INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'watching', added_at DATETIME NOT NULL)`,
+		`CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, directory_id INTEGER NOT NULL, path TEXT UNIQUE NOT NULL, hash TEXT NOT NULL, indexed_at DATETIME NOT NULL)`,
+		`INSERT INTO directories(path, added_at) VALUES('/tmp/a', '2026-01-01')`,
+		`INSERT INTO files(directory_id, path, hash, indexed_at) VALUES(1, '/tmp/a/old.pdf', 'oldhash', '2026-01-01')`,
+	}
+	for _, s := range stmts {
+		if _, err := legacy.Exec(s); err != nil {
+			t.Fatalf("legacy setup %q: %v", s[:30], err)
+		}
+	}
+	legacy.Close()
+
+	// Opening through the store must ALTER the table in place.
+	s, err := NewSQLiteStore(dbPath, 8)
+	if err != nil {
+		t.Fatalf("open legacy DB: %v", err)
+	}
+	defer s.Close()
+
+	got, err := s.GetFileByPath("/tmp/a/old.pdf")
+	if err != nil {
+		t.Fatalf("get legacy row: %v", err)
+	}
+	if got == nil || got.ExtractorVersion != 0 {
+		t.Fatalf("legacy row extractor_version = %+v, want 0", got)
+	}
+
+	// Round-trip a bumped version.
+	got.ExtractorVersion = 1
+	got.Hash = "newhash"
+	if err := s.UpsertFileWithChunks(*got, nil); err != nil {
+		t.Fatalf("upsert with version: %v", err)
+	}
+	after, _ := s.GetFileByPath("/tmp/a/old.pdf")
+	if after.ExtractorVersion != 1 {
+		t.Fatalf("extractor_version after upsert = %d, want 1", after.ExtractorVersion)
 	}
 }

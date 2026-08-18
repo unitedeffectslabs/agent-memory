@@ -279,6 +279,14 @@ func (m *MockWatcher) IsRunning() bool {
 type MockExtractor struct {
 	ExtractFn     func(path string) (extractor.Result, error)
 	IsSupportedFn func(path string) bool
+	VersionFn     func(path string) int
+}
+
+func (m *MockExtractor) Version(path string) int {
+	if m.VersionFn != nil {
+		return m.VersionFn(path)
+	}
+	return 0
 }
 
 func (m *MockExtractor) Extract(path string) (extractor.Result, error) {

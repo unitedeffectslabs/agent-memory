@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -95,11 +96,12 @@ func (s *SQLiteStore) migrate(dim int) error {
 			added_at    DATETIME NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS files (
-			id           INTEGER PRIMARY KEY AUTOINCREMENT,
-			directory_id INTEGER NOT NULL,
-			path         TEXT UNIQUE NOT NULL,
-			hash         TEXT NOT NULL,
-			indexed_at   DATETIME NOT NULL,
+			id                INTEGER PRIMARY KEY AUTOINCREMENT,
+			directory_id      INTEGER NOT NULL,
+			path              TEXT UNIQUE NOT NULL,
+			hash              TEXT NOT NULL,
+			indexed_at        DATETIME NOT NULL,
+			extractor_version INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY(directory_id) REFERENCES directories(id) ON DELETE CASCADE
 		)`,
 		`CREATE TABLE IF NOT EXISTS chunks (
@@ -126,6 +128,16 @@ func (s *SQLiteStore) migrate(dim int) error {
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("exec %q: %w", stmt[:min(40, len(stmt))], err)
+		}
+	}
+
+	// Additive migration for DBs created before extractor_version existed
+	// (CREATE IF NOT EXISTS above only shapes fresh tables). Existing rows
+	// default to 0 = "indexed under the original extraction logic", which is
+	// exactly what makes a version bump re-index them.
+	if _, err := s.db.Exec(`ALTER TABLE files ADD COLUMN extractor_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add extractor_version column: %w", err)
 		}
 	}
 	return nil
@@ -195,8 +207,8 @@ func (s *SQLiteStore) ListDirectories() ([]domain.Directory, error) {
 
 func (s *SQLiteStore) UpsertFile(f domain.File) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO files(directory_id, path, hash, indexed_at) VALUES(?, ?, ?, ?)`,
-		f.DirectoryID, f.Path, f.Hash, f.IndexedAt.UTC(),
+		`INSERT OR REPLACE INTO files(directory_id, path, hash, indexed_at, extractor_version) VALUES(?, ?, ?, ?, ?)`,
+		f.DirectoryID, f.Path, f.Hash, f.IndexedAt.UTC(), f.ExtractorVersion,
 	)
 	return err
 }
@@ -210,8 +222,8 @@ func (s *SQLiteStore) RemoveFile(path string) error {
 func (s *SQLiteStore) GetFileByPath(path string) (*domain.File, error) {
 	var f domain.File
 	err := s.db.QueryRow(
-		`SELECT id, directory_id, path, hash, indexed_at FROM files WHERE path = ?`, path,
-	).Scan(&f.ID, &f.DirectoryID, &f.Path, &f.Hash, &f.IndexedAt)
+		`SELECT id, directory_id, path, hash, indexed_at, extractor_version FROM files WHERE path = ?`, path,
+	).Scan(&f.ID, &f.DirectoryID, &f.Path, &f.Hash, &f.IndexedAt, &f.ExtractorVersion)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -294,8 +306,8 @@ func (s *SQLiteStore) UpsertFileWithChunks(f domain.File, chunks []domain.Chunk)
 
 	// Upsert the file row and resolve its (possibly new) ID within the tx.
 	res, err := tx.Exec(
-		`INSERT OR REPLACE INTO files(directory_id, path, hash, indexed_at) VALUES(?, ?, ?, ?)`,
-		f.DirectoryID, f.Path, f.Hash, f.IndexedAt.UTC(),
+		`INSERT OR REPLACE INTO files(directory_id, path, hash, indexed_at, extractor_version) VALUES(?, ?, ?, ?, ?)`,
+		f.DirectoryID, f.Path, f.Hash, f.IndexedAt.UTC(), f.ExtractorVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert file: %w", err)

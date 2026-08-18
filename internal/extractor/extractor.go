@@ -7,11 +7,13 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/ledongthuc/pdf"
 	"github.com/nguyenthenguyen/docx"
 	"github.com/xuri/excelize/v2"
 )
@@ -54,7 +56,22 @@ var binaryExtractors = map[string]func(path string) (Result, error){
 	".docx": extractDocx,
 	".xlsx": extractXlsx,
 	".pptx": extractPptx,
-	".pdf":  extractPDFPassthrough,
+	".pdf":  extractPDF,
+}
+
+// extractorVersions records, per extension, the version of that type's
+// extraction logic. Bump a type's version when its extraction OUTPUT changes,
+// so files already indexed under the old logic re-extract despite unchanged
+// content hashes (the engine skips a file only when hash AND version match).
+// Extensions absent here are version 0 — bumping one type re-indexes only
+// that type.
+var extractorVersions = map[string]int{
+	".pdf": 1, // v1 (2026-08): real text extraction replaced the raw-bytes passthrough
+}
+
+// extractorVersion returns the extraction-logic version for a path's type.
+func extractorVersion(path string) int {
+	return extractorVersions[strings.ToLower(filepath.Ext(path))]
 }
 
 // metadataExtensions are file types where we index filesystem + format metadata.
@@ -171,15 +188,36 @@ func extractPptx(path string) (Result, error) {
 	return Result{Text: sb.String()}, nil
 }
 
-// extractPDFPassthrough reads the PDF file as-is. The chunker already handles
-// PDF text via the content passed from engine.IndexFile (os.ReadFile).
-// This is a passthrough so the extractor pipeline handles it consistently.
-func extractPDFPassthrough(path string) (Result, error) {
-	data, err := os.ReadFile(path)
+// extractPDF extracts the document's readable text, page-concatenated. The
+// former "passthrough" here returned the raw PDF bytes as Text — compressed
+// stream noise that embedded as garbage and made PDFs unsearchable (see
+// Documentation/Bugs/pdf-extraction-passthrough.md; field-confirmed on real
+// vaults across PDF versions 1.3–1.6).
+func extractPDF(path string) (result Result, err error) {
+	// The rsc.io/pdf lineage panics on some malformed inputs; a corrupt PDF
+	// must surface as an indexing error (visible in the activity log), never
+	// crash the indexer.
+	defer func() {
+		if r := recover(); r != nil {
+			result, err = Result{}, fmt.Errorf("pdf parse panic: %v", r)
+		}
+	}()
+
+	f, reader, err := pdf.Open(path)
 	if err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("open pdf: %w", err)
 	}
-	return Result{Text: string(data)}, nil
+	defer f.Close()
+
+	textReader, err := reader.GetPlainText()
+	if err != nil {
+		return Result{}, fmt.Errorf("extract pdf text: %w", err)
+	}
+	var sb strings.Builder
+	if _, err := io.Copy(&sb, textReader); err != nil {
+		return Result{}, fmt.Errorf("read pdf text: %w", err)
+	}
+	return Result{Text: sb.String()}, nil
 }
 
 // extractMetadata builds a text description from file metadata and format-specific info.

@@ -252,13 +252,17 @@ func (eng *Engine) indexFile(path string) error {
 	}
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))
 
-	// 3. Check store for existing file — if hash matches, skip.
+	// 3. Check store for existing file — skip only if BOTH the content hash
+	// and the extraction-logic version match. An extractor fix changes neither
+	// the file nor its hash, so a hash-only check would keep old (possibly
+	// garbage) chunks forever — the PDF passthrough bug's exact trap.
 	existing, err := eng.store.GetFileByPath(path)
 	if err != nil {
 		return fmt.Errorf("get file by path %s: %w", path, err)
 	}
-	if existing != nil && existing.Hash == hash {
-		return nil // unchanged
+	extractorVer := eng.extractor.Version(path)
+	if existing != nil && existing.Hash == hash && existing.ExtractorVersion == extractorVer {
+		return nil // unchanged content AND unchanged extraction logic
 	}
 
 	// 4. Extract text content (handles text, docx, xlsx, pptx, metadata, etc.)
@@ -308,10 +312,11 @@ func (eng *Engine) indexFile(path string) error {
 	// separate writes could record the file at the new hash with zero chunks,
 	// and the hash short-circuit above would then skip it forever.
 	file := domain.File{
-		DirectoryID: dirID,
-		Path:        path,
-		Hash:        hash,
-		IndexedAt:   time.Now(),
+		DirectoryID:      dirID,
+		Path:             path,
+		Hash:             hash,
+		IndexedAt:        time.Now(),
+		ExtractorVersion: extractorVer,
 	}
 	if existing != nil {
 		file.ID = existing.ID

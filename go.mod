@@ -1,6 +1,6 @@
 module github.com/borzou/vecstore
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
@@ -29,6 +29,7 @@ require (
 	github.com/leaanthony/gosod v1.0.4 // indirect
 	github.com/leaanthony/slicer v1.6.0 // indirect
 	github.com/leaanthony/u v1.1.1 // indirect
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect

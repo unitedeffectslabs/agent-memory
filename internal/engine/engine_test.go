@@ -743,3 +743,62 @@ func TestStopWaitsForInflightIndexing(t *testing.T) {
 		t.Fatal("in-flight file's store write did not complete before Stop returned")
 	}
 }
+
+// TestExtractorVersionBumpForcesReindex is the regression test for the
+// re-extraction trap: fixing an extractor changes neither the file nor its
+// content hash, so the unchanged-hash skip would keep old garbage chunks
+// forever. A stored extractor_version older than the current one must force a
+// re-index; a matching one must still skip.
+func TestExtractorVersionBumpForcesReindex(t *testing.T) {
+	dir := t.TempDir()
+	content := "pretend pdf content"
+	filePath := tempFileInDir(t, dir, "doc.txt", content)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+
+	run := func(storedVersion, currentVersion int) (reindexed bool, recordedVersion int) {
+		t.Helper()
+		ms := &mocks.MockStore{
+			GetFileByPathFn: func(path string) (*domain.File, error) {
+				return &domain.File{ID: 1, DirectoryID: 1, Path: path, Hash: hash, ExtractorVersion: storedVersion}, nil
+			},
+			ListDirectoriesFn: func() ([]domain.Directory, error) {
+				return []domain.Directory{{ID: 1, Path: dir}}, nil
+			},
+			UpsertFileWithChunksFn: func(f domain.File, chunks []domain.Chunk) error {
+				reindexed = true
+				recordedVersion = f.ExtractorVersion
+				return nil
+			},
+		}
+		mc := &mocks.MockChunker{
+			ChunkTextFn: func(c string) ([]chunker.ChunkResult, error) {
+				return []chunker.ChunkResult{{Content: c, TokenCount: 3}}, nil
+			},
+		}
+		me := &mocks.MockEmbedder{
+			EmbedDocumentsFn: func(texts []string) ([][]float32, error) {
+				return [][]float32{{0.1, 0.2}}, nil
+			},
+		}
+		ext := defaultMockExtractor()
+		ext.VersionFn = func(path string) int { return currentVersion }
+		eng := New(ms, me, mc, &mocks.MockWatcher{}, ext)
+		if err := eng.IndexFile(filePath); err != nil {
+			t.Fatalf("IndexFile: %v", err)
+		}
+		return reindexed, recordedVersion
+	}
+
+	// Unchanged hash + SAME extractor version: skipped (today's cheap-rescan behavior).
+	if reindexed, _ := run(1, 1); reindexed {
+		t.Fatal("unchanged file with matching extractor version was re-indexed")
+	}
+	// Unchanged hash + BUMPED extractor version: must re-index and record the new version.
+	reindexed, recorded := run(0, 1)
+	if !reindexed {
+		t.Fatal("extractor version bump did not force a re-index — old chunks would persist forever")
+	}
+	if recorded != 1 {
+		t.Fatalf("re-index recorded extractor_version %d, want 1", recorded)
+	}
+}

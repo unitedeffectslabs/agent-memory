@@ -17,6 +17,11 @@ type File struct {
 	Path        string
 	Hash        string // SHA-256 hex
 	IndexedAt   time.Time
+	// ExtractorVersion is the extraction-logic version this file was indexed
+	// with. A file is skipped as unchanged only when its hash AND this version
+	// match — bumping a type's extractor version re-indexes that type even
+	// though file contents (and hashes) are unchanged.
+	ExtractorVersion int
 }
 
 type Chunk struct {
